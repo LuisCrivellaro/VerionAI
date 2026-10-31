@@ -7,7 +7,7 @@ Atualizado: 2026-10-31
 
 ## Em andamento
 - [x] Setup da equipe de agentes, skills e memória (branch `setup/agent-team`)
-- [ ] Spec do harness da Fase 0 (`docs/engineering/FASE0_HARNESS.md`)
+- [x] Spec do harness da Fase 0 (`docs/engineering/FASE0_HARNESS.md`), escrita pelo verion-architect; **revisão pelo verion-code-reviewer pendente**
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 
 ## Autorizações de gasto

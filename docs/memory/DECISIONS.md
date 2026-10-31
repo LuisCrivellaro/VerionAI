@@ -1,5 +1,17 @@
 # Decisões (a mais recente no topo)
 
+## 2026-10-31 · ADR-005 · Harness da Fase 0: adaptador síncrono + ledger SQLite com guarda de orçamento
+Status: proposta (aguarda revisão do verion-code-reviewer). Spec: `docs/engineering/FASE0_HARNESS.md`.
+Todo método (Ken Burns, parallax 2,5D, Veo, Gemini Omni, Kling, Wan) implementa o Protocol `SceneGenerator`
+(`estimate` + `generate` bloqueante, com polling interno). O harness roda as 12 cenas em sequência e grava cada
+tentativa (custo em R$, unidades, tempo, status) e cada veredito de QC em SQLite (`runs`, `attempts`, `qc_reviews`,
+`authorizations`). Toda chamada paga exige `--allow-paid` **e** saldo em `authorizations`; o limite é de 3 tentativas
+por cena, e uma tentativa sem QC bloqueia a próxima. O registry carrega os adaptadores sob demanda, para que cada
+um tenha seus próprios arquivos. O ledger é exportado em JSONL versionado, porque a sessão é efêmera.
+Rejeitados: interface assíncrona ou fila (12 cenas sequenciais não justificam isso); Pydantic, SQLAlchemy/Alembic, Typer
+e tenacity (o stdlib basta e são dependências a menos); commit do `.db` binário (o JSONL é diffável).
+Reavaliar com paralelismo de cenas ou na migração para Postgres (Fase 2).
+
 ## 2026-10-31 · ADR-004 · Memória compartilhada em arquivos versionados
 Memória em `CLAUDE.md` + `docs/memory/STATE.md` + `docs/memory/DECISIONS.md`.
 Beads foi avaliado e rejeitado por enquanto: exige o binário `bd` e Dolt embutido em cada sessão

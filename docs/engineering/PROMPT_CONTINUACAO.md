@@ -15,6 +15,11 @@ arquiteto, empreendedor e estrategista de negócios. Fale em **português brasil
 
 **Primeira ação obrigatória:** clone o repo, faça checkout de `setup/agent-team` e leia, nesta ordem:
 
+0. **Documentos de produto (contexto completo, leia integralmente):**
+   - `docs/product/BRIEF.md`: brief original do produto, com as 22 seções e as decisões do usuário
+   - `docs/product/PLANO_MVP.md`: análise crítica, riscos, escopo do MVP, stack, custos, Fase 0, roadmap e fontes
+   - `docs/product/PEDIDO_EQUIPE_AGENTES.md`: pedido original e integral da equipe de agentes (11 repositórios, 15 papéis, regras)
+   - `README.md`: visão pública do projeto
 1. `CLAUDE.md` (instrução do projeto: siga-o)
 2. `docs/memory/STATE.md` (estado atual, bloqueios, autorizações de gasto)
 3. `docs/memory/DECISIONS.md` (ADR-001 a ADR-005)
@@ -208,7 +213,29 @@ vercel-react-best-practices, skill-creator) já existem.
 
 ---
 
-## 6. REGRAS INVIOLÁVEIS
+## 6. MAPA DO REPOSITÓRIO
+
+```
+README.md                          visão pública
+CLAUDE.md                          instrução do supervisor (roteamento, fluxo, custos, regras)
+.claude/settings.json              plugin Superpowers (marketplace obra/superpowers)
+.claude/agents/verion-*.md         9 subagentes
+.claude/skills/<15 skills>/        13 de terceiros + verion-ffmpeg-assembly + verion-fidelity-qc
+docs/product/BRIEF.md              brief completo do produto
+docs/product/PLANO_MVP.md          análise e plano do MVP
+docs/product/PEDIDO_EQUIPE_AGENTES.md  pedido original da equipe de agentes
+docs/memory/STATE.md               estado, bloqueios, autorizações de gasto, decisões pendentes
+docs/memory/DECISIONS.md           ADR-001 a ADR-005
+docs/engineering/FASE0_HARNESS.md  spec do harness da Fase 0 (12 tarefas)
+docs/engineering/HANDOFF.md        histórico do setup
+docs/engineering/evidence/         evidências 01, 02 e 03
+docs/engineering/third-party/      licenças das skills copiadas
+docs/engineering/PROMPT_CONTINUACAO.md  este arquivo
+```
+
+Ainda não existe código de produto (`src/`, `tests/`). O primeiro código é o harness da Fase 0.
+
+## 7. REGRAS INVIOLÁVEIS
 
 - **Chamadas pagas (Veo, Kling, Omni, GPU) estão BLOQUEADAS** até o usuário autorizar o orçamento em `STATE.md`.
 - Nenhuma característica inventada em vídeo entregue. Nada de scraping no Airbnb. Nada de WhatsApp sem opt-in.

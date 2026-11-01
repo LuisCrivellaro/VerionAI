@@ -1,0 +1,45 @@
+# EXEMPLO de tabela de preços. Os valores abaixo são FICTÍCIOS (marcadores de posição).
+# Copie para config/prices.toml (ou aponte VERION_PRICES para outro arquivo) e preencha cada
+# preço com o valor da página oficial do provedor, registrando a fonte e a data em `source`.
+# Regras (verion.config.load_prices):
+#   - métodos grátis (ken-burns, parallax-2.5d): price_per_unit = 0 e unit_kind = "none";
+#   - métodos pagos: price_per_unit > 0 e unit_kind diferente de "none";
+#   - currency = "USD" é convertida por fx_usd_brl; "BRL" é usada como está.
+
+fx_usd_brl = 1.00   # EXEMPLO: substitua pela cotação real (e registre a data)
+
+[methods."ken-burns"]
+unit_kind = "none"
+price_per_unit = 0.0
+currency = "BRL"
+source = "local (ffmpeg), sem custo variável"
+
+[methods."parallax-2.5d"]
+unit_kind = "none"
+price_per_unit = 0.0
+currency = "BRL"
+source = "local, sem custo variável"
+
+[methods."veo-3.1-fast"]
+unit_kind = "video_seconds"
+price_per_unit = 1.0         # EXEMPLO FICTÍCIO
+currency = "USD"
+source = "EXEMPLO: preencher com a página oficial e a data da consulta"
+
+[methods."gemini-omni-1.1-flash"]
+unit_kind = "video_seconds"
+price_per_unit = 1.0         # EXEMPLO FICTÍCIO
+currency = "USD"
+source = "EXEMPLO: preencher com a página oficial e a data da consulta"
+
+[methods."kling-3.0"]
+unit_kind = "video_seconds"
+price_per_unit = 1.0         # EXEMPLO FICTÍCIO
+currency = "USD"
+source = "EXEMPLO: preencher com a página oficial e a data da consulta"
+
+[methods."wan-2.2-5b"]
+unit_kind = "gpu_seconds"
+price_per_unit = 0.001       # EXEMPLO FICTÍCIO
+currency = "USD"
+source = "EXEMPLO: preencher com a página do provedor de GPU e a data da consulta"

@@ -12,7 +12,10 @@ Atualizado: 2026-11-01
 - [x] Spec corrigida pelo verion-architect (rodada 2, 364 linhas, changelog na seção 7)
 - [x] Revisão rodada 2: 11/12 resolvidos + 2 bloqueantes novos corrigidos pelo supervisor → **spec aprovada** (evidência 05)
 - [x] Skill de QC com gemini-omni; `config/prices.toml` (Omni = hipótese); AGENT_ARCHITECTURE.md e AGENT_SKILLS.md
-- [ ] **Implementação T1 (verion-backend) — PRÓXIMO PASSO**, depois T2, então {T3,T5,T8,T9} conforme FASE0_HARNESS.md
+- [ ] **T1 EM ANDAMENTO (verion-backend, interrompida em 2026-11-01) — PRÓXIMO PASSO**
+  - Feito: `pyproject.toml`, `uv.lock`, `.gitignore`, `config/prices.example.toml`, `src/verion/{__init__,errors,config}.py`, `src/verion/ledger/{__init__.py,repo.py,schema.sql}`, `tests/{conftest,test_config,test_ledger}.py` → **116 testes passando** (`uv run pytest -q --ignore=tests/test_budget.py`).
+  - Falta: `src/verion/budget.py` (`tests/test_budget.py` já escrito e falhando por ImportError: fase vermelha do TDD), `tests/test_architecture.py` (AST, caso j), rodar a suíte completa verde, revisão do verion-code-reviewer, commit.
+  - Depois: T2 e então {T3, T5, T8, T9} conforme FASE0_HARNESS.md.
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 
 ## Autorizações de gasto

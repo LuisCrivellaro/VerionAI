@@ -1,0 +1,15 @@
+# Dados do harness (banco, clipes, fotos reais): nunca no repositório
+data/
+
+# Segredos
+.env
+.env.*
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

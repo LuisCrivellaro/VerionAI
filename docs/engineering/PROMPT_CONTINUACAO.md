@@ -137,7 +137,7 @@ Regras obrigatórias do usuário:
 - [x] Subagentes configurados e reconhecidos (evidência 03, item 1)
 - [x] Orquestrador funcional (nativo do Claude Code + Superpowers; delegação 1 concluída)
 - [x] Delegação testada (arquiteto → spec da Fase 0)
-- [ ] **Revisão entre agentes demonstrada** (o code-reviewer revisando o trabalho do arquiteto; foi interrompida)
+- [x] **Revisão entre agentes demonstrada** (rodada 1: code-reviewer reprovou com 7 bloqueantes, evidência 04; o arquiteto corrigiu na rodada 2). Falta a revisão da rodada 2.
 - [ ] **Documentação atualizada**: `docs/engineering/AGENT_ARCHITECTURE.md` e `docs/engineering/AGENT_SKILLS.md`
 - [ ] Evidências completas dos testes
 - [ ] **Usar a equipe na continuidade do desenvolvimento**, sem depender de comandos manuais do usuário para cada delegação
@@ -192,11 +192,13 @@ vercel-react-best-practices, skill-creator) já existem.
 
 1. **Garantir os agentes:** confirme que os 9 `verion-*` estão disponíveis para a ferramenta Agent. Se não
    estiverem, copie `.claude/agents/verion-*.md` para `~/.claude/agents/` e confirme.
-2. **Revisão cruzada:** delegue ao `verion-code-reviewer` a revisão de `FASE0_HARNESS.md` e do ADR-005. Peça
-   para checar mecanicamente se há arquivos compartilhados entre tarefas, a consistência entre dataclasses,
-   SQLite e CLI, se o bloqueio de gasto é impossível de contornar e se todo critério de pronto é testável sem
-   chamada paga. No máximo 12 comentários, com veredito APROVADO ou MUDANÇAS NECESSÁRIAS. Bloqueantes voltam ao
-   `verion-architect`, com no máximo 2 rodadas. Registre tudo em `docs/engineering/evidence/03-delegacao.md`.
+2. **Revisão cruzada, rodada 2 (próximo passo; a rodada 1 já foi feita):** delegue ao `verion-code-reviewer`
+   a revisão da spec corrigida `docs/engineering/FASE0_HARNESS.md`. Ele deve conferir se cada um dos 12 comentários
+   de `docs/engineering/evidence/04-revisao-fase0-rodada1.md` foi realmente resolvido (o changelog está na seção 7
+   da spec), refazer a checagem mecânica de arquivos exclusivos por tarefa e verificar as novas dependências
+   ("Depende de"). Veredito APROVADO ou MUDANÇAS NECESSÁRIAS. Se ainda houver bloqueantes, o supervisor decide:
+   corrige pontualmente ou devolve ao arquiteto uma última vez. Registre o resultado em
+   `docs/engineering/evidence/05-revisao-fase0-rodada2.md` e atualize o ADR-005 se a decisão mudou.
 3. Atualize `verion-fidelity-qc` com o método `gemini-omni-1.1-flash`.
 4. Delegue ao `verion-product` a criação de `config/prices.toml` a partir dos preços do plano (seção 2), com fonte e data.
 5. Escreva `docs/engineering/AGENT_ARCHITECTURE.md`: hierarquia, responsabilidades, skills por papel, regras

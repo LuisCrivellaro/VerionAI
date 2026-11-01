@@ -1,13 +1,16 @@
 # Estado do projeto
 
-Atualizado: 2026-10-31
+Atualizado: 2026-11-01
 
 ## Fase atual
 **Fase 0 — validação audiovisual** (ainda não iniciada). Ambiente de agentes configurado nesta data.
 
 ## Em andamento
 - [x] Setup da equipe de agentes, skills e memória (branch `setup/agent-team`)
-- [x] Spec do harness da Fase 0 (`docs/engineering/FASE0_HARNESS.md`), escrita pelo verion-architect; **revisão pelo verion-code-reviewer pendente**
+- [x] Spec do harness da Fase 0 escrita pelo verion-architect (rodada 1)
+- [x] Revisão rodada 1 pelo verion-code-reviewer: MUDANÇAS NECESSÁRIAS, 7 bloqueantes (evidência 04)
+- [x] Spec corrigida pelo verion-architect (rodada 2, 364 linhas, changelog na seção 7)
+- [ ] **Revisão rodada 2 pelo verion-code-reviewer (PRÓXIMO PASSO)**
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 
 ## Autorizações de gasto

@@ -14,7 +14,7 @@ Repositório: `LuisCrivellaro/VerionAI`, branch **`setup/agent-team`** (vale o c
    completo do produto e o pedido original da equipe de agentes.
 5. `docs/engineering/AGENT_ARCHITECTURE.md` e `docs/engineering/AGENT_SKILLS.md`: a equipe e as ferramentas.
 6. `docs/engineering/FASE0_HARNESS.md`: spec **aprovada** do harness, com 12 tarefas, dependências e critérios.
-7. `docs/engineering/evidence/` (01 a 05) e `docs/engineering/HANDOFF.md`: o que foi verificado e como.
+7. `docs/engineering/evidence/` (01 a 06) e `docs/engineering/HANDOFF.md`: o que foi verificado e como.
 
 Não refaça análises que já estão registradas.
 
@@ -44,37 +44,49 @@ Luis Crivellaro: estudante de Engenharia de Software (FIAP), empreendedor, quer 
   - Ferramentas rejeitadas ou adiadas, com justificativa: Ruflo, Oh My ClaudeCode, Beads, Graphify, MCP Agent Mail e Skill Seekers.
 - **Arquivos de apoio:** `config/prices.toml`, com fontes (o preço do Gemini Omni é hipótese), e os docs de arquitetura e skills.
 
-**Em andamento: T1 do harness** (base: config, ledger SQLite, trava de gasto). O `verion-backend` foi interrompido no meio.
-- **Pronto:** config, errors e ledger, com 116 testes passando (`uv run pytest -q --ignore=tests/test_budget.py`).
-- **Falta:**
-  - `src/verion/budget.py`: `tests/test_budget.py` já está escrito e falha por ImportError, que é a fase vermelha do TDD.
-  - `tests/test_architecture.py`: o teste AST, caso (j).
-  - A suíte completa verde.
-  - A revisão do `verion-code-reviewer`.
-  - O commit.
+**Em andamento: T1 do harness** (base: config, ledger SQLite, trava de gasto).
+- **No `setup/agent-team` (commit `e9c7d5f`, verde):** `budget.py` e `tests/test_architecture.py` implementados, com 173 testes passando (`uv run pytest`).
+- **Revisão rodada 1 = MUDANÇAS NECESSÁRIAS:** 1 bloqueante, 4 sugestões fortes e detalhes. Tudo está em `docs/engineering/evidence/06-revisao-t1-rodada1.md`.
+  O bloqueante: os campos públicos do `SpendToken` podem ser alterados, e `settle_ok` grava R$ 0 numa tentativa paga.
+- **Correções 1–7 começadas e interrompidas:** estão no branch **`wip/t1-revisao`** (commit `17a22f8`), com 195 testes verdes e 9 vermelhos:
+  - `test_free_method_needs_neither_allow_paid_nor_balance`
+  - `test_budget_exceeded_when_spent_349_plus_estimate_2_of_350`
+  - `test_settle_ok_converts_usd_with_fx`
+  - `test_settle_ok_with_invalid_units_leaves_row_pending`
+  - `test_cannot_settle_twice`
+  - `test_ok_without_qc_blocks_next_reserve_until_verdict`
+  - `test_attempt_rule_errors_are_not_spend_blocked`
+  - `test_token_tampered_numeric_fields_are_refused[field_value2]`
+  - `test_reserved_brl_cannot_be_updated_in_sql` (o trigger do item 5c ainda não foi criado em `schema.sql`)
+
+  Hipótese, não verificada: vários testes antigos quebraram porque o `settle_ok` passou a exigir token consumido (item 2) e eles liquidam sem chamar `consume`. Se for isso, ajuste o teste para chamar `token.consume(method)` antes, sem afrouxar a regra.
 
 ## 4. O que fazer agora (em ordem)
 
-1. **Agentes:** se os `verion-*` não aparecerem para a ferramenta Agent, copie `.claude/agents/verion-*.md` para
-   `~/.claude/agents/` e confirme que foram carregados. Não reinstale skills nem o plugin.
-2. **Termine a T1:**
-   - Delegue ao `verion-backend`, informando o que já existe (seção 3). Os arquivos permitidos são só os da linha T1 de `FASE0_HARNESS.md`.
-   - Peça para implementar `budget.py` até `test_budget.py` passar, criar `test_architecture.py` e rodar `uv run pytest -q` completo.
-   - Respeite as correções A–E do changelog final da spec.
-3. **Revisão da T1** pelo `verion-code-reviewer`, focando na trava de gasto (`SpendToken`, reserva `pending` em
-   `BEGIN IMMEDIATE`, concorrência). No máximo 2 rodadas. Commit e push quando aprovado. Registre a evidência em
-   `docs/engineering/evidence/` e atualize `STATE.md`.
+1. **Agentes:** os `verion-*` só carregam no início da sessão.
+   - Se não aparecerem para a ferramenta Agent, copie `.claude/agents/verion-*.md` para `~/.claude/agents/`.
+   - Se continuarem sem aparecer, delegue a `general-purpose` com a definição do agente (o arquivo `.md`) no prompt.
+   - Não reinstale skills nem o plugin.
+2. **Termine as correções da T1** no branch `wip/t1-revisao`:
+   - Delegue ao `verion-backend` os itens 1–7 da evidência 06. Ignore os itens 8, 9 e 12: o 8 vai para o harness da T3.
+   - Arquivos permitidos: `budget.py`, `tests/test_budget.py` (só acrescentar testes ou chamar `consume` antes de `settle_ok`), `tests/test_architecture.py`, `ledger/schema.sql` (trigger de `reserved_brl`) e `ledger/repo.py` (ROLLBACK quando o COMMIT falhar).
+   - A suíte completa (`uv run pytest`) precisa ficar verde.
+3. **Revisão rodada 2 (a última)** pelo `verion-code-reviewer`, conferindo os itens 1–7.
+   - Se aprovada: registre em `DECISIONS.md` os desvios aceitos (`_MIN_COST_BRL`, `_BALANCE_EPS`, `_ISSUED`, token guarda `prices`, `settle_error` aceita token não consumido).
+   - Crie a evidência 07, faça o merge de `wip/t1-revisao` em `setup/agent-team` e atualize `STATE.md`.
+   - Faça commit e push.
 4. **Siga a ordem da spec:**
-   - Faça a T2.
-   - Depois {T3, T5, T8, T9}, em paralelo só quando não houver arquivos em comum.
+   - Faça a T2. A regra 4 do AST deve conferir os caminhos de `METHODS` contra as classes verificadas.
+   - Depois {T3, T5, T8, T9}, em paralelo só quando não houver arquivos em comum. A T3 testa que uma exceção em `settle_ok` cai em `settle_error` com a reserva.
    - Depois {T6, T7}, T4 e T12.
    - T10 (Kling) e T11 (Wan) continuam bloqueadas até o usuário escolher o acesso e o provedor de GPU.
    - Cada tarefa vai ao agente indicado na spec, em TDD, passa por QA e pela revisão do `verion-code-reviewer` antes do commit.
 5. **Ao terminar o harness sem chamadas pagas,** apresente ao usuário:
    - um relatório objetivo do que funciona, com evidências;
-   - as decisões pendentes de `STATE.md`: cliente-alvo, liberação de até R$ 350 para a Fase 0, 3 imóveis de teste com
-     autorização, hipótese de preço e retenção;
+   - as decisões pendentes de `STATE.md`: cliente-alvo, liberação de até R$ 350 para a Fase 0, 3 imóveis de teste com autorização, hipótese de preço e retenção;
    - o pedido de liberação dos domínios das APIs pagas no proxy.
+
+**Push:** se o `git push` der 403 do proxy, adicione o repositório `LuisCrivellaro/VerionAI` às fontes da sessão (ferramenta `add_repo`, acesso `push`) e tente de novo.
 
 ## 5. Regras invioláveis
 

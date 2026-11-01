@@ -1,6 +1,6 @@
 ---
 name: verion-fidelity-qc
-description: Use when judging whether a generated or animated VÉRION scene is faithful to the source photo, deciding approve / redo / reject, writing the per-scene fidelity report, or designing automated fidelity checks. Applies to image-to-video (Veo, Kling, Wan), 2.5D depth parallax and Ken Burns clips.
+description: Use when judging whether a generated or animated VÉRION scene is faithful to the source photo, deciding approve / redo / reject, writing the per-scene fidelity report, or designing automated fidelity checks. Applies to image-to-video (Veo, Gemini Omni, Kling, Wan), 2.5D depth parallax and Ken Burns clips.
 ---
 
 # VÉRION — controle de fidelidade por cena
@@ -44,7 +44,7 @@ Métricas automáticas (SSIM/LPIPS contra a foto, detecção de objetos novos) s
 ## Registro obrigatório por cena
 
 ```json
-{"projeto": "...", "cena": 3, "metodo": "veo-3.1-fast|kling-3.0|wan-2.2-5b|parallax-2.5d|ken-burns|video-real",
+{"projeto": "...", "cena": 3, "metodo": "veo-3.1-fast|gemini-omni-1.1-flash|kling-3.0|wan-2.2-5b|parallax-2.5d|ken-burns|video-real",
  "tentativa": 2, "veredito": "aprovada|refazer|rejeitada",
  "defeitos": [{"tipo": 2, "segundo": 3.0, "nota": "janela da sala ganhou uma folha extra"}],
  "custo_brl": 1.84, "revisor": "humano|agente"}

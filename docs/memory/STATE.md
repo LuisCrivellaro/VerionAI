@@ -11,8 +11,8 @@ Atualizado: 2026-11-01
 - [x] Revisão rodada 1 pelo verion-code-reviewer: MUDANÇAS NECESSÁRIAS, 7 bloqueantes (evidência 04)
 - [x] Spec corrigida pelo verion-architect (rodada 2, 364 linhas, changelog na seção 7)
 - [x] Revisão rodada 2: 11/12 resolvidos + 2 bloqueantes novos corrigidos pelo supervisor → **spec aprovada** (evidência 05)
-- [ ] Itens 3–6 do HANDOFF (skill de QC, prices.toml, AGENT_ARCHITECTURE, AGENT_SKILLS)
-- [ ] Implementação T1 (verion-backend)
+- [x] Skill de QC com gemini-omni; `config/prices.toml` (Omni = hipótese); AGENT_ARCHITECTURE.md e AGENT_SKILLS.md
+- [ ] **Implementação T1 (verion-backend) — PRÓXIMO PASSO**, depois T2, então {T3,T5,T8,T9} conforme FASE0_HARNESS.md
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 
 ## Autorizações de gasto

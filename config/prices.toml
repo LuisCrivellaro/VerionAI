@@ -1,0 +1,42 @@
+# Tabela de preços do harness da Fase 0 (lida por verion.config.load_prices).
+# Os preços abaixo foram pesquisados em 31/10/2026 (ver docs/product/PLANO_MVP.md).
+# Reconfira na página oficial de cada provedor antes de autorizar gasto real.
+# Formato: um bloco [methods."<id do registry>"] por método.
+
+fx_usd_brl = 5.10   # PTAX 16/10/2026 = 5,0826, arredondado para cima por margem
+
+[methods."ken-burns"]
+unit_kind = "none"
+price_per_unit = 0.0
+currency = "BRL"
+source = "local (ffmpeg), sem custo variável"
+
+[methods."parallax-2.5d"]
+unit_kind = "none"
+price_per_unit = 0.0
+currency = "BRL"
+source = "local (CPU/GPU própria), sem custo variável"
+
+[methods."veo-3.1-fast"]
+unit_kind = "video_seconds"
+price_per_unit = 0.12        # 1080p; 720p = 0.10
+currency = "USD"
+source = "Gemini API pricing via benchlm.ai/media-pricing/veo, lido em 2026-09-11"
+
+[methods."gemini-omni-1.1-flash"]
+unit_kind = "video_seconds"
+price_per_unit = 0.10        # HIPÓTESE: 720p ~US$ 0,10/s, derivado de tokens; 1080p não confirmado
+currency = "USD"
+source = "layer3labs.io/guides/veo-3-pricing (2026-09-27); confirmar na página oficial do Gemini antes de usar"
+
+[methods."kling-3.0"]
+unit_kind = "video_seconds"
+price_per_unit = 0.126       # Standard, image-to-video, API oficial; Pro = 0.168
+currency = "USD"
+source = "costbench.com/software/ai-media-apis/kling-api (confiança média, abr/2026)"
+
+[methods."wan-2.2-5b"]
+unit_kind = "gpu_seconds"
+price_per_unit = 0.0000944   # RTX 4090 RunPod Community a US$ 0,34/h, cobrado por segundo
+currency = "USD"
+source = "hackceleration.com/labs/runpod-pricing (jun/2026); Community Cloud não mudou no reajuste de 15/10/2026"

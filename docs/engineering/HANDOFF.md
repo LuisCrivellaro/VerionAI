@@ -26,25 +26,40 @@
 - wshobson: foram copiadas só 4 skills. Os plugins completos trazem agentes com `model: opus` e 16 skills ou mais cada.
 - Skills da conta claude.ai (frontend-design, ui-ux-pro-max, webapp-testing, vercel-react-best-practices, skill-creator) **não** foram duplicadas.
 
-## Falta fazer
+## Andamento após o handoff inicial
 
-1. Criar `.claude/agents/` com 9 agentes VÉRION (frontmatter: name, description, tools, model, skills, color):
-   - verion-product (PM + Finanças/custos) · sonnet · senior-product-manager
-   - verion-architect (Arquitetura + DevOps) · opus · staff-software-architect
-   - verion-media-engineer (Visão computacional + vídeo/ffmpeg) · sonnet · senior-cv-engineer, verion-ffmpeg-assembly, verion-fidelity-qc
-   - verion-ai-engineer (LLM, adaptadores Veo/Kling/Wan, avaliações) · sonnet · gemini-api-dev, gemini-omni-flash-api, llm-evaluation, senior-eval-engineer, python-resilience
-   - verion-backend (Backend + Banco + Automação) · sonnet · python-expert, uv-package-manager
-   - verion-frontend (Frontend + UI/UX, dormente até a Fase 3) · sonnet
-   - verion-qa · sonnet · python-testing-patterns
-   - verion-security (somente leitura, LGPD) · sonnet · principal-security-engineer
-   - verion-code-reviewer (somente leitura: Read, Grep, Glob, Bash) · sonnet · senior-code-reviewer
-2. `CLAUDE.md` na raiz: papel de CTO, tabela de roteamento papel → agente, regras de delegação
-   (tarefa simples = sem delegação; nunca dois agentes no mesmo arquivo; revisão obrigatória pelo
-   code-reviewer antes de commit), controle de custo (teto de R$ 500/mês; registrar custo de toda chamada paga).
-3. `docs/memory/DECISIONS.md` e `docs/memory/STATE.md`.
-4. Verificar o reconhecimento: abrir o Claude Code no repo, rodar `/agents` e `/skills` (ou `claude -p` com
-   `--output-format stream-json` e ler a lista de agents/skills no evento `init`).
-5. Testar a delegação real: (a) verion-architect escreve `docs/engineering/FASE0_HARNESS.md`;
-   (b) verion-code-reviewer revisa; (c) o supervisor integra. Guardar as evidências em `docs/engineering/evidence/`.
-6. Escrever `docs/engineering/AGENT_SKILLS.md` e `docs/engineering/AGENT_ARCHITECTURE.md`.
-7. Próximo passo de produto: Fase 0 (ver o documento "VÉRION — Análise crítica e plano do MVP").
+- Os 9 agentes foram criados, reconhecidos e testados (evidências 01 a 03).
+- `CLAUDE.md` e a memória (`docs/memory/`) foram criados.
+- A delegação foi testada: o arquiteto escreveu a spec da Fase 0.
+- A revisão cruzada da rodada 1 reprovou a spec com 7 bloqueantes (evidência 04).
+- O arquiteto corrigiu a spec na rodada 2 (changelog na seção 7 de `FASE0_HARNESS.md`).
+- Contexto do produto: `docs/product/` (BRIEF, PLANO_MVP, PEDIDO_EQUIPE_AGENTES).
+
+## Falta fazer (em ordem)
+
+1. **Garantir os agentes:** confirme que os 9 `verion-*` estão disponíveis para a ferramenta Agent. Se não
+   estiverem, copie `.claude/agents/verion-*.md` para `~/.claude/agents/` e confirme.
+2. **Revisão cruzada, rodada 2 (próximo passo; a rodada 1 já foi feita):** delegue ao `verion-code-reviewer`
+   a revisão da spec corrigida `docs/engineering/FASE0_HARNESS.md`. Ele deve conferir se cada um dos 12 comentários
+   de `docs/engineering/evidence/04-revisao-fase0-rodada1.md` foi realmente resolvido (o changelog está na seção 7
+   da spec), refazer a checagem mecânica de arquivos exclusivos por tarefa e verificar as novas dependências
+   ("Depende de"). Veredito APROVADO ou MUDANÇAS NECESSÁRIAS. Se ainda houver bloqueantes, o supervisor decide:
+   corrige pontualmente ou devolve ao arquiteto uma última vez. Registre o resultado em
+   `docs/engineering/evidence/05-revisao-fase0-rodada2.md` e atualize o ADR-005 se a decisão mudou.
+3. Atualize `verion-fidelity-qc` com o método `gemini-omni-1.1-flash`.
+4. Delegue ao `verion-product` a criação de `config/prices.toml` a partir dos preços do plano (seção 2), com fonte e data.
+5. Escreva `docs/engineering/AGENT_ARCHITECTURE.md`: hierarquia, responsabilidades, skills por papel, regras
+   de delegação, comunicação, memória, controle de custos, critérios de revisão e fluxos de execução.
+6. Escreva `docs/engineering/AGENT_SKILLS.md`: cada skill com origem, commit, licença e agente que usa; o
+   plugin; ferramentas rejeitadas com justificativa; como reinstalar numa máquina nova.
+7. Atualize `STATE.md` e `HANDOFF.md`, faça commit e push.
+8. **Comece a Fase 0 usando a equipe**, pelas tarefas de `FASE0_HARNESS.md` que não dependem de chamada paga.
+   Cada tarefa vai ao agente responsável com apenas os seus arquivos, em TDD (`superpowers:test-driven-development`),
+   com QA e revisão do `verion-code-reviewer` antes de cada commit. Paralelize só tarefas independentes.
+9. Ao final, apresente ao usuário um relatório objetivo com: skills instaladas, subagentes disponíveis,
+   orquestrador, ferramentas rejeitadas e por quê, arquitetura da equipe, fluxo de delegação, memória,
+   custos e dependências, testes realizados com evidências e próximos passos.
+
+## Regras
+
+Chamadas pagas estão bloqueadas até o usuário autorizar em `STATE.md`. Não reinstale o que já existe e não adicione orquestradores rejeitados. Faça commit e push com frequência.

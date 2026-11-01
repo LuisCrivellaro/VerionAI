@@ -38,13 +38,11 @@ MIN_SCENE, MAX_SCENE = 1, 12
 class SpendToken:
     """Autorização de uso único para UMA chamada de ``generate``. Só ``reserve`` cria (exige ``_SEAL``).
 
-    Exceção declarada à regra ``frozen``: guarda ``_conn`` e as flags mutáveis ``_used``/``_job_id``.
+    Exceção declarada à regra ``frozen``: só ``_used`` muda depois da criação (``_conn`` é fixo). Os
+    campos públicos são somente leitura e, a cada uso, conferidos contra a linha ``pending`` no banco.
     """
 
-    attempt_id: int
-    attempt_no: int
-    method: str
-    reserved_brl: float
+    _MUTABLE: Final = frozenset({"_used"})
 
     def __init__(
         self,
@@ -59,25 +57,56 @@ class SpendToken:
     ) -> None:
         if seal is not _SEAL:
             raise TokenInvalid("SpendToken só pode ser criado por budget.reserve")
-        self._conn = conn
-        self._prices = prices
-        self._used = False
-        self._job_id: str | None = None
-        self.attempt_id = attempt_id
-        self.attempt_no = attempt_no
-        self.method = method
-        self.reserved_brl = reserved_brl
+        init = object.__setattr__
+        init(self, "_conn", conn)
+        init(self, "_prices", prices)
+        init(self, "_used", False)
+        init(self, "_attempt_id", attempt_id)
+        init(self, "_attempt_no", attempt_no)
+        init(self, "_method", method)
+        init(self, "_reserved_brl", reserved_brl)
         _ISSUED.add(self)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name not in self._MUTABLE:
+            raise AttributeError(f"SpendToken.{name} é somente leitura")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"SpendToken.{name} não pode ser apagado")
+
+    @property
+    def attempt_id(self) -> int:
+        return self._attempt_id
+
+    @property
+    def attempt_no(self) -> int:
+        return self._attempt_no
+
+    @property
+    def method(self) -> str:
+        return self._method
+
+    @property
+    def reserved_brl(self) -> float:
+        return self._reserved_brl
 
     def _require_issued(self) -> None:
         # ``in`` usa hash por identidade; ``__new__`` sem init e cópias não estão em _ISSUED.
         if self not in _ISSUED:
             raise TokenInvalid("SpendToken não foi emitido por budget.reserve")
 
+    def _require_conn(self, conn: sqlite3.Connection) -> None:
+        if conn is not self._conn:
+            raise TokenInvalid("SpendToken usado com conexão diferente da que fez a reserva")
+
     def _require_pending(self) -> AttemptRow:
-        row = repo.get_attempt(self._conn, self.attempt_id)
+        """Linha ``pending`` da reserva, conferida campo a campo contra o token."""
+        row = repo.get_attempt(self._conn, self._attempt_id)
         if row is None or row.status != "pending":
-            raise TokenInvalid(f"tentativa {self.attempt_id} não está pending")
+            raise TokenInvalid(f"tentativa {self._attempt_id} não está pending")
+        if (row.method, row.attempt_no, row.reserved_brl) != (self._method, self._attempt_no, self._reserved_brl):
+            raise TokenInvalid(f"SpendToken não confere com a tentativa {self._attempt_id} no ledger")
         return row
 
     def consume(self, method: str) -> None:
@@ -85,8 +114,8 @@ class SpendToken:
         self._require_issued()
         if self._used:
             raise TokenInvalid("SpendToken já usado")
-        if method != self.method:
-            raise TokenInvalid(f"SpendToken é do método {self.method!r}, não de {method!r}")
+        if method != self._method:
+            raise TokenInvalid(f"SpendToken é do método {self._method!r}, não de {method!r}")
         self._require_pending()
         self._used = True
 
@@ -97,8 +126,8 @@ class SpendToken:
             raise TokenInvalid("job_accepted antes de consume")
         if not isinstance(job_id, str) or not job_id.strip():
             raise InputError("job_id vazio")
-        repo.set_job_id(self._conn, self.attempt_id, job_id.strip())
-        self._job_id = job_id.strip()
+        self._require_pending()
+        repo.set_job_id(self._conn, self._attempt_id, job_id.strip())
 
 
 def reserve(
@@ -120,11 +149,13 @@ def reserve(
     if paid and not allow_paid:
         raise PaidCallBlocked(f"método pago {method!r} exige --allow-paid")
     cost = prices.cost_brl(method, units)  # PriceMissing / EstimateInvalid (não finito, negativo)
+    if not math.isfinite(cost):
+        raise EstimateInvalid(f"custo não finito para {method!r}: units={units!r}")
     if unit_kind != prices.unit_kind_of(method):
         raise EstimateInvalid(f"unit_kind {unit_kind!r} diverge da tabela de preços para {method!r}")
     if paid and (units <= 0 or round(cost, 6) < _MIN_COST_BRL):
         raise EstimateInvalid(f"estimativa inválida para {method!r}: units={units!r}, custo=R$ {cost!r}")
-    if isinstance(scene_index, bool) or not MIN_SCENE <= scene_index <= MAX_SCENE:
+    if type(scene_index) is not int or not MIN_SCENE <= scene_index <= MAX_SCENE:
         raise InputError(f"cena fora de {MIN_SCENE}..{MAX_SCENE}: {scene_index!r}")
 
     with repo.transaction(conn):  # BEGIN IMMEDIATE; rollback em qualquer exceção
@@ -173,12 +204,17 @@ def settle_ok(
 ) -> AttemptRow:
     """Liquida com sucesso, gravando o custo real calculado pela tabela a partir de ``units``."""
     token._require_issued()
-    paid = token._prices.is_paid(token.method)
-    cost = token._prices.cost_brl(token.method, units)  # EstimateInvalid se não finito/negativo
-    if paid and (units <= 0 or round(cost, 6) < _MIN_COST_BRL):
-        raise EstimateInvalid(f"unidades inválidas na liquidação de {token.method!r}: {units!r}")
+    token._require_conn(conn)
+    if not token._used:
+        raise TokenInvalid("settle_ok exige token consumido por generate")
     with repo.transaction(conn):
-        token._require_pending()
+        row = token._require_pending()
+        method = row.method  # preço sempre pelo método gravado no ledger
+        cost = token._prices.cost_brl(method, units)  # EstimateInvalid se não finito/negativo
+        if not math.isfinite(cost) or (
+            token._prices.is_paid(method) and (units <= 0 or round(cost, 6) < _MIN_COST_BRL)
+        ):
+            raise EstimateInvalid(f"unidades inválidas na liquidação de {method!r}: {units!r}")
         return repo.finish_attempt(
             conn,
             token.attempt_id,
@@ -205,13 +241,18 @@ def settle_error(
 ) -> AttemptRow:
     """Liquida com erro: custo = max(faturado, reserva). Funciona mesmo sem ``consume`` prévio."""
     token._require_issued()
-    billed = billed_units
-    if isinstance(billed, bool) or not isinstance(billed, int | float) or not math.isfinite(billed) or billed < 0:
-        billed = 0.0  # lixo do provedor não pode reduzir a reserva
-    billed_cost = token._prices.cost_brl(token.method, billed)
+    token._require_conn(conn)
+    billed = _billed_or_none(billed_units)
     message = error if isinstance(error, str) and error.strip() else "erro sem mensagem"
+    if billed is None:
+        message += f" [billed_units inválido ignorado: {billed_units!r}]"
+        billed = 0.0
     with repo.transaction(conn):
         row = token._require_pending()
+        billed_cost = token._prices.cost_brl(row.method, billed)
+        if not math.isfinite(billed_cost):
+            message += f" [custo faturado não finito ignorado: {billed_units!r}]"
+            billed_cost = 0.0
         if billed_cost > row.reserved_brl:
             cost, units = billed_cost, billed
         else:
@@ -229,3 +270,14 @@ def settle_error(
             provider_job_id=provider_job_id,
             error=message,
         )
+
+
+def _billed_or_none(value: object) -> float | None:
+    """Converte unidades faturadas (int, float, Decimal, numpy...) ou ``None`` se inválidas."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None

@@ -48,6 +48,7 @@ stderr e devolve o `exit_code`. Qualquer outra exceção é bug: sai com traceba
 ### 3.2 Configuração e preços (`config.py`)
 
 ```python
+UnitKind = Literal["video_seconds", "gpu_seconds", "credits", "none"]   # definido aqui (T1); base.py importa de config
 FREE_METHODS: Final = frozenset({"ken-burns", "parallax-2.5d"})   # mudar exige ADR
 class MethodPrice: unit_kind: UnitKind; price_per_unit: float; currency: Literal["USD", "BRL"]; source: str
 class PriceTable:
@@ -70,6 +71,7 @@ ambiente e repassa os valores por argumento. As exceções são o cliente real d
 
 ```python
 class SpendToken:            # só reserve() cria (exige o selo privado budget._SEAL); uso único
+    # EXCEÇÃO à regra frozen: classe comum (não dataclass congelada); guarda `_conn` e a flag mutável `_used`
     attempt_id: int; attempt_no: int; method: str; reserved_brl: float
     def consume(self, method: str) -> None: ...      # TokenInvalid: sem selo, já usado, outro método, linha não-pending
     def job_accepted(self, job_id: str) -> None: ... # grava provider_job_id na linha pending (autocommit)
@@ -97,13 +99,13 @@ casas e vírgula>`; sem TTY → `AuthorizationRefused`, nada gravado. Verificado
 tem TTY (`os.isatty(0)` é False, `/dev/tty` inexistente). Limite declarado: é atrito contra ação acidental, não
 fronteira de segurança (um agente pode emular TTY ou gravar no SQLite). As barreiras reais são (a) a chave de API, que
 só o usuário põe no ambiente depois de autorizar, (b) uma regra `deny` de permissão para o comando (pendência do
-supervisor) e (c) o teste AST da T1, que proíbe `add_authorization` fora de `cli.py`.
+supervisor) e (c) o teste AST da T1, que proíbe `add_authorization` em `src/verion/**` fora de `cli.py` e `providers/contract.py` (testes podem semear autorização via `repo`).
 
 ### 3.4 Contrato do adaptador (`providers/base.py`) e registry
 
 ```python
 Camera = Literal["push-in", "pull-out", "pan-left", "pan-right", "static"]
-UnitKind = Literal["video_seconds", "gpu_seconds", "credits", "none"]
+from verion.config import UnitKind   # T1; não redefinir aqui
 class Scene: index: int; photo: Path; room: str; camera: Camera; duration_s: float; prompt: str; negative_prompt: str = ""
 #  duration_s: alvo de 3.0 a 10.0; prompt descreve só o movimento de câmera, nunca objeto ausente da foto
 class SceneRequest: scene: Scene; run_id: int; attempt_no: int; out_path: Path; seed: int | None = None
@@ -230,6 +232,9 @@ def finish_attempt(conn, attempt_id: int, *, status: Literal["ok", "error"], cos
 def settle_pending(conn, attempt_id: int, *, cost_brl: float, note: str) -> AttemptRow  # vira error; custo >= reserva
 def list_attempts(conn, *, run_id: int | None = None, method: str | None = None) -> list[AttemptRow]
 def get_qc(conn, attempt_id: int) -> QcRow | None
+def get_attempt(conn, attempt_id: int) -> AttemptRow | None      # ledger settle, qc record, qc frames
+def list_runs(conn) -> list[RunRow]                                # report, export
+def list_authorizations(conn) -> list[tuple[int, float, str, str]] # (id, amount_brl, reference, created_at); budget show
 def scene_status(conn, run_id: int, scene_index: int) -> tuple[SceneStatus, str | None]   # (status, motivo)
 def record_qc(conn, attempt_id: int, *, verdict: str, reviewer: str, defects: Sequence[Defect]) -> int
 def spent_brl(conn) -> float          # SUM(cost_brl) de todas as tentativas; pending conta pela reserva
@@ -298,9 +303,9 @@ Caminhos sem prefixo `tests/`, `config/`, `examples/`, `pyproject.toml` ou `.git
 
 | # | Agente | Depende de | Arquivos exclusivos | Pronto quando (testes) |
 |---|---|---|---|---|
-| T1 | backend | n/a | `pyproject.toml`, `.gitignore` (+`data/`), `__init__.py`, `errors.py`, `config.py`, `budget.py`, `ledger/{__init__.py,repo.py,schema.sql}`, `config/prices.example.toml`, `tests/conftest.py`, `tests/test_{config,ledger,budget,architecture}.py` | `uv run pytest` verde nesses arquivos, cobrindo: (a) pago sem `allow_paid` → `PaidCallBlocked` e 0 linhas; (b) gasto 349 + estimativa 2 com 350 autorizados → `BudgetExceeded` e 0 linhas; (c) `units=0` ou preço ausente → `EstimateInvalid`/`PriceMissing`; (d) duas conexões em threads com saldo para uma → exatamente 1 `pending`; (e) reserva não liquidada conta em `spent_brl` e gera `PendingAttempt`; (f) `settle_error` com faturado < reserva grava a reserva; `settle_pending` não reduz custo; (g) token forjado, reusado ou de outro método → `TokenInvalid`; (h) 3 erros → `rejeitada`, e a 4ª → `SceneClosed`; `ok` sem QC → `AwaitingQC`; (i) cada regra de `record_qc`; (j) `test_architecture` (AST): `_SEAL` e `insert_pending` só em `budget.py`/`ledger/repo.py`; `add_authorization` só em `cli.py`; todo `generate` em `providers/*.py` e `local/{ken_burns,parallax}.py` recebe `token` e começa com `token.consume(self.method)` |
+| T1 | backend | n/a | `pyproject.toml`, `.gitignore` (+`data/`), `__init__.py`, `errors.py`, `config.py`, `budget.py`, `ledger/{__init__.py,repo.py,schema.sql}`, `config/prices.example.toml`, `tests/conftest.py`, `tests/test_{config,ledger,budget,architecture}.py` | `uv run pytest` verde nesses arquivos, cobrindo: (a) pago sem `allow_paid` → `PaidCallBlocked` e 0 linhas; (b) gasto 349 + estimativa 2 com 350 autorizados → `BudgetExceeded` e 0 linhas; (c) `units=0` ou preço ausente → `EstimateInvalid`/`PriceMissing`; (d) duas conexões em threads com saldo para uma → exatamente 1 `pending`; (e) reserva não liquidada conta em `spent_brl` e gera `PendingAttempt`; (f) `settle_error` com faturado < reserva grava a reserva; `settle_pending` não reduz custo; (g) token forjado, reusado ou de outro método → `TokenInvalid`; (h) 3 erros → `rejeitada`, e a 4ª → `SceneClosed`; `ok` sem QC → `AwaitingQC`; (i) cada regra de `record_qc`; (j) `test_architecture` (AST): `_SEAL` e `insert_pending` só em `budget.py`/`ledger/repo.py`; escopo = `src/verion/**` (exclui `tests/`); `add_authorization` só em `cli.py` e `providers/contract.py` (allow-list explícita); todo método `generate` de classe `*Adapter` em `providers/*.py` e `local/{ken_burns,parallax}.py` recebe `token` e começa com `token.consume(self.method)` (o Protocol em `base.py` é isento) |
 | T2 | ai-engineer | T1 | `providers/{__init__.py,base.py,registry.py,contract.py,fake.py}`, `tests/providers/test_fake.py`, `tests/providers/test_registry.py` | contrato passa no `fake`; `METHODS` = exatamente os 7 ids com os caminhos de 3.4; `create("x")` → `UnknownMethod`; módulo ausente → `MethodUnavailable`; os 3 modos de `VERION_FAKE_MODE` funcionam; o `fake` grava um arquivo de bytes, não MP4 |
-| T3 | backend | T1, T2 | `script.py`, `harness.py`, `examples/roteiro.example.toml`, `tests/test_script.py`, `tests/test_harness.py` | com `fake` e `fake_clock`: 12 cenas → 12 `ok` com `wall_time_s` exato; `billed_error` → `error` com custo = max(faturado, reserva) e run encerrado; `BudgetExceeded` → 0 tentativas; `KeyboardInterrupt` em `generate` → `error` com a reserva e exceção relançada; `aguardando_qc` → `skipped`; cada caso de `ScriptError` |
+| T3 | backend | T1, T2 | `script.py`, `harness.py`, `examples/roteiro.example.toml`, `examples/fotos/` (sintéticas), `tests/test_script.py`, `tests/test_harness.py` | com `fake` e `fake_clock`: 12 cenas → 12 `ok` com `wall_time_s` exato; `billed_error` → `error` com custo = max(faturado, reserva) e run encerrado; `BudgetExceeded` → 0 tentativas; `KeyboardInterrupt` em `generate` → `error` com a reserva e exceção relançada; `aguardando_qc` → `skipped`; cada caso de `ScriptError` |
 | T5 | media | T1, T2 | `local/{__init__.py,ffmpeg.py,ken_burns.py}`, `tests/local/conftest.py`, `tests/local/test_ffmpeg.py`, `tests/local/test_ken_burns.py` | para cada `camera`, 5 s sobre `synthetic_photo` em formato de entrega, com 5,0 ± 0,05 s; contrato passa com o executor real do ffmpeg |
 | T8 | ai-engineer | T2 | `providers/veo.py`, `tests/providers/test_veo.py` | contrato passa com mock; o request leva foto + prompt + duração suportada; polling até concluir; `job_accepted` recebe o id; timeout → `ProviderError(transient=True)`; `units` = segundos gerados |
 | T9 | ai-engineer | T2 | `providers/gemini_omni.py`, `tests/providers/test_gemini_omni.py` | igual à T8, via Files API + Interactions API (first-frame, 1080p, duração inteira de 3 a 10) |
@@ -352,7 +357,7 @@ flowchart LR
 
 1. **Gasto por convenção.** `paid` passa a vir de `PriceTable.is_paid` (pago por padrão). `generate` exige um `SpendToken` de uso único, validado contra a linha `pending`. O custo vem só da tabela, e custo ≤ 0 gera `EstimateInvalid`. O cliente é preguiçoso. `authorize` exige TTY e frase, com limite declarado. Um teste AST protege tudo isso.
 2. **Crash perde custo.** A reserva `pending` é gravada em `BEGIN IMMEDIATE` antes da chamada. Toda exceção liquida com custo ≥ reserva. Uma `pending` órfã conta no gasto e bloqueia a cena até `ledger settle`.
-3. **T1 dependia da T2.** `reserve` e `settle_*` recebem primitivos, e as exceções ficam em `errors.py` (T1). A T1 não importa nada da T2.
+3. **T1 dependia da T2.** `reserve` e `settle_*` recebem primitivos, e as exceções ficam em `errors.py` (T1). A T1 não importa nada da T2; `UnitKind` mora em `config.py` (correção da rodada 2, problema A).
 4. **T6/T7 paralelas à T5.** Agora dependem da T5. Entra a coluna "Depende de", com a ordem revisada.
 5. **Configuração da CLI.** `VERION_DATA_DIR`, `VERION_PRICES`, `VERION_FAKE_MODE` e `--out` estão em 3.2 e 4. A T12 usa essas variáveis em `tmp_path`.
 6. **Repo indefinido.** `AttemptRow`, `RunRow`, `QcRow`, `Defect` e todas as assinaturas estão em 3.7; o relatório, em 3.9.
@@ -362,3 +367,16 @@ flowchart LR
 10. **Export.** O mapeamento campo a campo está em 3.8. Tentativa sem QC sai com `null`, o `fake` é omitido, o Omni sai literal (risco 6) e o `scenes.jsonl` traz o status final.
 11. **Códigos de saída.** `VerionError.exit_code` assume 0 e 2 a 6, definido em `errors.py`. `AttemptLimit` foi absorvido por `SceneClosed`.
 12. **Duração alvo.** `ClipSpec.target_s` e `attempts.target_s` cortam na R2; o teste usa um clipe de 8 s com alvo de 5 s. As entregas de pesquisa saíram da coluna de testes.
+
+### Rodada 2 → aprovação (correções aplicadas pelo supervisor, `evidence/05-revisao-fase0-rodada2.md`)
+
+- **A.** `UnitKind` passou para `config.py` (T1), e `base.py` o importa de lá. A T1 não depende mais da T2.
+- **B.** O teste AST cobre só `src/verion/**`, com allow-list `cli.py` + `providers/contract.py` para `add_authorization`. A regra de `token.consume` vale só para classes `*Adapter`; o Protocol é isento.
+- **C.** Novas leituras no repo: `get_attempt`, `list_runs` e `list_authorizations`.
+- **D.** `SpendToken` é exceção declarada à regra `frozen`: guarda `_conn` e `_used`.
+- **E.** As capacidades do SDK do Gemini (Files + Interactions, first-frame, 1080p, 3–10 s) e a versão `google-genai>=2.19.0` são **hipóteses a confirmar na T9**. A T9 pode ajustar o próprio critério de pronto, registrando a mudança em `DECISIONS.md`.
+- **Detalhes:**
+  - A T12 cria as próprias fotos sintéticas e arquivos `.depth.png` em `tests/acceptance/conftest.py`.
+  - A T4 não depende da T6; a ordem só a coloca depois por conveniência.
+  - O `examples/roteiro.example.toml` (T3) aponta para fotos que a própria T3 gera em `examples/fotos/`.
+

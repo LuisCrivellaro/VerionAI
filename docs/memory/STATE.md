@@ -10,7 +10,9 @@ Atualizado: 2026-11-01
 - [x] Spec do harness da Fase 0 escrita pelo verion-architect (rodada 1)
 - [x] Revisão rodada 1 pelo verion-code-reviewer: MUDANÇAS NECESSÁRIAS, 7 bloqueantes (evidência 04)
 - [x] Spec corrigida pelo verion-architect (rodada 2, 364 linhas, changelog na seção 7)
-- [ ] **Revisão rodada 2 pelo verion-code-reviewer (PRÓXIMO PASSO)**
+- [x] Revisão rodada 2: 11/12 resolvidos + 2 bloqueantes novos corrigidos pelo supervisor → **spec aprovada** (evidência 05)
+- [ ] Itens 3–6 do HANDOFF (skill de QC, prices.toml, AGENT_ARCHITECTURE, AGENT_SKILLS)
+- [ ] Implementação T1 (verion-backend)
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 
 ## Autorizações de gasto

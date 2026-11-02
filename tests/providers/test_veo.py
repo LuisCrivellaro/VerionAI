@@ -17,6 +17,8 @@ codificam a doc oficial e o SDK, não respostas reais do servidor.
 
 from __future__ import annotations
 
+import base64
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -109,12 +111,14 @@ class MockVeo:
         submits: list[Any] | None = None,
         polls: list[Any] | None = None,
         download_error: Exception | None = None,
+        download_failures: list[Exception] | None = None,
         on_poll: Callable[[], None] | None = None,
     ) -> None:
         self._mp4 = mp4
         self._submits: deque[Any] = deque(submits if submits is not None else [pending_op()])
         self._polls: list[Any] = list(polls if polls is not None else [pending_op(), done_op()])
         self._download_error = download_error
+        self._download_failures: deque[Exception] = deque(download_failures or [])
         self._on_poll = on_poll
         self.submit_kwargs: list[dict[str, Any]] = []
         self.poll_count = 0
@@ -141,6 +145,8 @@ class MockVeo:
 
     def _download(self, *, file: Any, destination: Any = None, **kwargs: Any) -> None:
         self.download_calls.append({"file": file, "destination": destination})
+        if self._download_failures:
+            raise self._download_failures.popleft()
         if self._download_error is not None:
             raise self._download_error
         shutil.copyfile(self._mp4, destination)
@@ -458,13 +464,33 @@ def test_happy_path_result_and_file(
     assert mock_veo.download_calls[0]["file"].uri == VIDEO_URI
 
 
-def test_units_are_the_generated_seconds_not_the_requested(
+def test_units_never_drop_below_the_requested_seconds(
     go: Callable[..., Any], make_mp4: Callable[[float], Path]
 ) -> None:
-    client = MockVeo(make_mp4(4.0))  # pediu 6, o provedor entregou 4
+    client = MockVeo(make_mp4(4.0))  # pediu 6, o provedor entregou 4: units = max(medido, pedido)
     result, _t, _r = go(client)
-    assert result.units == pytest.approx(4.0, abs=0.2)
-    assert result.duration_s == pytest.approx(result.units)
+    assert result.units == 6.0
+    assert result.duration_s == pytest.approx(4.0, abs=0.2)  # o clipe real continua com a duração medida
+    assert float(result.meta["measured_s"]) == pytest.approx(4.0, abs=0.2)
+    assert result.meta["requested_s"] == "6"
+    assert "warning" not in result.meta
+
+
+def test_measured_slightly_above_requested_is_billed_by_measured_without_warning(
+    go: Callable[..., Any], make_mp4: Callable[[float], Path]
+) -> None:
+    result, _t, _r = go(MockVeo(make_mp4(6.5)))  # 0,5 s acima do pedido: dentro da tolerância de 1 s
+    assert result.units == pytest.approx(6.5, abs=0.2) and result.units > 6.0
+    assert "warning" not in result.meta
+
+
+def test_measured_more_than_one_second_above_requested_is_flagged(
+    go: Callable[..., Any], make_mp4: Callable[[float], Path]
+) -> None:
+    result, _t, _r = go(MockVeo(make_mp4(8.0)))  # pediu 6, veio 8
+    assert result.units == pytest.approx(8.0, abs=0.2)
+    assert float(result.meta["measured_s"]) == pytest.approx(8.0, abs=0.2)
+    assert "maior que o pedido" in result.meta["warning"]
 
 
 def test_polls_until_done_with_injected_sleep(
@@ -580,11 +606,11 @@ def test_permanent_client_errors_are_not_transient_nor_retried(
 def test_ambiguous_submit_failures_are_not_retried(
     go: Callable[..., Any], mock_veo: MockVeo, exc: Exception
 ) -> None:
-    # O POST pode ter chegado e sido faturado: repetir duplicaria a cobrança. Sem id, billed_units = 0
-    # (o ledger mantém a reserva inteira em qualquer erro).
+    # O POST pode ter chegado e sido faturado: repetir duplicaria a cobrança. Sem id, mas com
+    # billed_units = segundos pedidos (regra conservadora, igual à pós-aceite).
     client = MockVeo(mock_veo._mp4, submits=[exc])
     err = provider_error(go, client)
-    assert (err.transient, err.billed_units, err.provider_job_id) == (False, 0.0, None)
+    assert (err.transient, err.billed_units, err.provider_job_id) == (False, 6.0, None)
     assert len(client.submit_kwargs) == 1
     assert "pode ter sido aceito" in str(err)
 
@@ -601,8 +627,21 @@ def test_operation_without_name_is_billed_conservatively_without_id(
 # --- cliente preguiçoso e chave --------------------------------------------------------------
 
 
-def test_real_client_is_created_lazily_after_consume(
+KEY = "chave-ficticia-de-teste"
+
+
+@pytest.fixture
+def hostile_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ambiente que, sem as travas do adaptador, trocaria a plataforma (Vertex) e a chave (GOOGLE_API_KEY)."""
+    monkeypatch.setenv("GEMINI_API_KEY", KEY)
+    monkeypatch.setenv("GOOGLE_API_KEY", "outra-chave-que-nao-deve-valer")
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "projeto-que-nao-deve-valer")
+
+
+def test_real_client_is_created_lazily_after_consume_with_pinned_options(
     monkeypatch: pytest.MonkeyPatch,
+    hostile_env: None,
     go: Callable[..., Any],
     mock_veo: MockVeo,
     prices: PriceTable,
@@ -618,18 +657,47 @@ def test_real_client_is_created_lazily_after_consume(
     assert created == []
     go(None)
     assert len(created) == 1
-    assert created[0]["http_options"].timeout == 120_000  # timeout por chamada, em ms
+    kwargs = created[0]
+    assert kwargs["vertexai"] is False  # GOOGLE_GENAI_USE_VERTEXAI=true do ambiente não vale
+    assert kwargs["api_key"] == KEY  # GOOGLE_API_KEY (precedência no SDK) não vale
+    opts = kwargs["http_options"]
+    assert opts.timeout == 120_000  # timeout por chamada, em ms
+    assert opts.retry_options.attempts == 1  # o SDK não reenvia sozinho
+    assert opts.retry_options.http_status_codes == [599]
 
 
-def test_missing_api_key_is_a_config_error_before_any_call(
-    monkeypatch: pytest.MonkeyPatch, go: Callable[..., Any]
+def test_real_sdk_client_built_from_hostile_env_is_gemini_api_with_gemini_key(
+    monkeypatch: pytest.MonkeyPatch, hostile_env: None, go: Callable[..., Any], mock_veo: MockVeo
 ) -> None:
-    def no_key(**_: Any) -> Any:
-        raise ValueError("Missing key inputs argument!")
+    built: list[Any] = []
+    original = veo.genai.Client
 
-    monkeypatch.setattr(veo.genai, "Client", no_key)
-    with pytest.raises(ConfigError, match="chave"):
+    def factory(**kwargs: Any) -> Any:
+        real = original(**kwargs)  # o construtor REAL do SDK, sem rede
+        built.append(real)
+        return mock_veo  # o resto do fluxo usa o mock
+
+    monkeypatch.setattr(veo.genai, "Client", factory)
+    go(None)
+    assert built[0].vertexai is False
+    assert built[0]._api_client.api_key == KEY
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_missing_or_blank_gemini_key_is_a_config_error_before_any_call(
+    monkeypatch: pytest.MonkeyPatch, go: Callable[..., Any], value: str | None
+) -> None:
+    # Mesmo com GOOGLE_API_KEY presente: só GEMINI_API_KEY vale.
+    monkeypatch.setenv("GOOGLE_API_KEY", "nao-deve-valer")
+    if value is None:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("GEMINI_API_KEY", value)
+    called: list[Any] = []
+    monkeypatch.setattr(veo.genai, "Client", lambda **kw: called.append(kw))
+    with pytest.raises(ConfigError, match="GEMINI_API_KEY"):
         go(None)
+    assert called == []
 
 
 # --- falhas DEPOIS do aceite -----------------------------------------------------------------
@@ -679,13 +747,33 @@ def test_filtered_video_is_post_accept_failure(go: Callable[..., Any], mock_veo:
     assert "política de segurança" in str(err)
 
 
-def test_download_failure_is_post_accept_failure(
-    go: Callable[..., Any], mock_veo: MockVeo
+def test_download_failure_after_three_attempts_is_post_accept_failure(
+    go: Callable[..., Any], mock_veo: MockVeo, sleeps: list[float]
 ) -> None:
     client = MockVeo(mock_veo._mp4, download_error=httpx.ReadTimeout("download lento"))
     err = provider_error(go, client)
+    assert_post_accept(err, client)  # inclui: uma única submissão, nunca reenviada
+    assert len(client.download_calls) == 3
+    assert sleeps[-2:] == [2.0, 4.0]  # backoff injetado; nenhuma espera real
+
+
+def test_download_is_retried_without_resubmitting_the_generation(
+    go: Callable[..., Any], mock_veo: MockVeo, sleeps: list[float]
+) -> None:
+    client = MockVeo(
+        mock_veo._mp4, download_failures=[httpx.ReadTimeout("lento"), api_error(503)]
+    )
+    result, _t, req = go(client)
+    assert len(client.download_calls) == 3 and len(client.submit_kwargs) == 1
+    assert result.provider_job_id == JOB and req.out_path.is_file()
+    assert not list(req.out_path.parent.glob("*.part"))
+
+
+def test_permanent_download_error_is_not_retried(go: Callable[..., Any], mock_veo: MockVeo) -> None:
+    client = MockVeo(mock_veo._mp4, download_error=api_error(403))
+    err = provider_error(go, client)
     assert_post_accept(err, client)
-    assert len(client.download_calls) == 1  # sem retry de download dentro do adaptador
+    assert len(client.download_calls) == 1
 
 
 def test_corrupt_download_is_post_accept_failure_and_leaves_no_clip(
@@ -744,3 +832,255 @@ def test_post_accept_failure_keeps_job_id_in_ledger(
     budget.settle_error(
         conn, token, billed_units=6.0, error="x", wall_time_s=0.0, provider_job_id=JOB
     )
+
+
+# --- o id do job não pôde ser gravado no ledger ----------------------------------------------
+
+
+class LedgerFailingToken:
+    """Token cujo ``job_accepted`` falha (ex.: banco travado), mas que consome normalmente."""
+
+    def __init__(self, inner: SpendToken, exc: Exception) -> None:
+        self._inner = inner
+        self._exc = exc
+
+    def consume(self, method: str) -> None:
+        self._inner.consume(method)
+
+    def job_accepted(self, job_id: str) -> None:
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc", [sqlite3.OperationalError("database is locked"), InputError("job_id vazio")]
+)
+def test_job_accepted_failure_is_post_accept_failure_with_the_job_id(
+    conn: sqlite3.Connection,
+    prices: PriceTable,
+    scene: Scene,
+    run_id: int,
+    out_dir: Path,
+    funded: None,
+    mock_veo: MockVeo,
+    adapter_factory: Callable[..., VeoAdapter],
+    exc: Exception,
+) -> None:
+    gen = adapter_factory(mock_veo)
+    token = token_for(conn, prices, gen, scene, run_id)
+    with pytest.raises(ProviderError) as info:
+        gen.generate(req_for(scene, token, run_id, out_dir), LedgerFailingToken(token, exc))  # type: ignore[arg-type]
+    err = info.value
+    assert (err.transient, err.billed_units, err.provider_job_id) == (False, 6.0, JOB)
+    assert "ledger" in str(err) and JOB in str(err)
+    assert len(mock_veo.submit_kwargs) == 1  # nunca reenvia
+    assert mock_veo.poll_count == 0 and mock_veo.download_calls == []
+    assert err.__cause__ is exc
+
+
+# --- redação de segredos ---------------------------------------------------------------------
+
+SECRET = "AIzaSy" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"
+LEAKY_URL = f"https://generativelanguage.googleapis.com/v1beta/models/m:predictLongRunning?key={SECRET}"
+
+
+def _leaky_clients(mp4: Path) -> dict[str, MockVeo]:
+    leaky = f"falha em {LEAKY_URL} header x-goog-api-key: {SECRET} Authorization: Bearer ya29.{SECRET}"
+    return {
+        "submit-400": MockVeo(mp4, submits=[api_error(400, message=leaky)]),
+        "submit-429": MockVeo(mp4, submits=[api_error(429, message=leaky)]),
+        "submit-500": MockVeo(mp4, submits=[api_error(500, message=leaky)]),
+        "submit-connect": MockVeo(mp4, submits=[httpx.ConnectError(leaky)]),
+        "submit-read-timeout": MockVeo(mp4, submits=[httpx.ReadTimeout(leaky)]),
+        "poll-404": MockVeo(mp4, polls=[api_error(404, message=leaky)]),
+        "poll-transport": MockVeo(mp4, polls=[httpx.ReadTimeout(leaky)]),
+        "operation-error": MockVeo(
+            mp4,
+            polls=[gtypes.GenerateVideosOperation(name=JOB, done=True, error={"message": leaky})],
+        ),
+        "download": MockVeo(mp4, download_error=httpx.ReadTimeout(leaky)),
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_leaky_clients(Path("x.mp4"))))
+def test_provider_error_messages_never_contain_the_api_key(
+    go: Callable[..., Any],
+    mock_veo: MockVeo,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+) -> None:
+    caplog.set_level("DEBUG")
+    err = provider_error(go, _leaky_clients(mock_veo._mp4)[case])
+    text = str(err)
+    assert SECRET not in text and "ya29." not in text and "Bearer ya29" not in text
+    assert "REDACTED" in text
+    assert SECRET not in caplog.text  # nem nos logs do retry
+
+
+def test_redact_handles_key_query_header_and_bearer() -> None:
+    out = veo._redact(f"a ?key={SECRET}&x=1 b x-goog-api-key: {SECRET} c Bearer abc.DEF-123 d {SECRET}")
+    assert SECRET not in out and "abc.DEF" not in out
+    assert "x=1" in out  # só o segredo sai, o resto do texto fica
+
+
+def test_redact_query_and_header_secrets_that_do_not_look_like_google_keys() -> None:
+    out = veo._redact("GET /x?api_key=segredo-simples&b=2 x-goog-api-key: outro-segredo")
+    assert "segredo-simples" not in out and "outro-segredo" not in out
+    assert "b=2" in out
+
+
+def test_redact_truncates_long_text() -> None:
+    assert len(veo._redact("x" * 5000)) <= 400
+
+
+# --- genai.Client REAL sobre httpx.MockTransport ---------------------------------------------
+
+
+def _http_error(status: int) -> httpx.Response:
+    return httpx.Response(status, json={"error": {"code": status, "message": "falha simulada", "status": "ERR"}})
+
+
+class SdkServer:
+    """Servidor fictício do Gemini API (``httpx.MockTransport``) para o ``genai.Client`` REAL.
+
+    Rotas (URLs medidas no SDK instalado): ``POST .../models/<id>:predictLongRunning``,
+    ``GET .../models/<id>/operations/<n>`` e ``GET <video.uri>``. Cada script define o resultado de cada
+    requisição da rota (status HTTP, ``"connect"`` ou ``"read_timeout"``); esgotado, responde sucesso.
+    As respostas de sucesso são escritas a partir da doc e do parser do SDK: o servidor real é HIPÓTESE.
+    """
+
+    def __init__(self, mp4: Path) -> None:
+        self.mp4_bytes = mp4.read_bytes()
+        self.post_script: list[int | str] = []
+        self.poll_script: list[int | str] = []
+        self.download_script: list[int | str] = []
+        self.posts = 0
+        self.polls = 0
+        self.ok_polls = 0
+        self.downloads = 0
+        self.requests: list[httpx.Request] = []
+
+    @staticmethod
+    def _step(script: list[int | str], request: httpx.Request) -> httpx.Response | None:
+        step = script.pop(0) if script else 200
+        if step == "connect":
+            raise httpx.ConnectError("sem rota", request=request)
+        if step == "read_timeout":
+            raise httpx.ReadTimeout("lento", request=request)
+        return None if step == 200 else _http_error(int(step))
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        url = str(request.url)
+        if request.method == "POST" and url.endswith(":predictLongRunning"):
+            self.posts += 1
+            return self._step(self.post_script, request) or httpx.Response(200, json={"name": JOB})
+        if request.method == "GET" and "/operations/" in url:
+            self.polls += 1
+            failed = self._step(self.poll_script, request)
+            if failed is not None:
+                return failed
+            self.ok_polls += 1
+            if self.ok_polls < 2:
+                return httpx.Response(200, json={"name": JOB, "done": False})
+            sample = {"video": {"uri": VIDEO_URI}}
+            return httpx.Response(
+                200,
+                json={"name": JOB, "done": True, "response": {"generateVideoResponse": {"generatedSamples": [sample]}}},
+            )
+        if request.method == "GET" and ":download" in url:
+            self.downloads += 1
+            return self._step(self.download_script, request) or httpx.Response(200, content=self.mp4_bytes)
+        return httpx.Response(404, json={"error": {"code": 404, "message": f"rota inesperada {url}", "status": "NF"}})
+
+
+@pytest.fixture
+def sdk_server(
+    monkeypatch: pytest.MonkeyPatch, hostile_env: None, make_mp4: Callable[[float], Path]
+) -> SdkServer:
+    """Troca só a rede: o adaptador cria o ``genai.Client`` REAL pelo caminho preguiçoso, com as opções dele."""
+    server = SdkServer(make_mp4(6.0))
+    original = veo.genai.Client
+
+    def factory(**kwargs: Any) -> Any:
+        http = httpx.Client(transport=httpx.MockTransport(server.handler))
+        options = kwargs["http_options"].model_copy(update={"httpx_client": http})
+        return original(**{**kwargs, "http_options": options})
+
+    monkeypatch.setattr(veo.genai, "Client", factory)
+    return server
+
+
+def test_real_sdk_end_to_end_submit_poll_download(
+    go: Callable[..., Any], sdk_server: SdkServer, scene: Scene, sleeps: list[float]
+) -> None:
+    result, _token, req = go(None)
+    assert (sdk_server.posts, sdk_server.ok_polls, sdk_server.downloads) == (1, 2, 1)
+    assert result.provider_job_id == JOB and req.out_path.is_file()
+    assert result.units == 6.0 and result.duration_s == pytest.approx(6.0, abs=0.2)
+    assert sleeps == [10.0, 10.0]  # duas esperas simuladas; nenhuma real
+    # O corpo que o SDK real serializou leva foto + prompt + duração suportada.
+    post = next(r for r in sdk_server.requests if r.method == "POST")
+    body = json.loads(post.content)
+    assert body["instances"][0]["prompt"] == scene.prompt
+    assert base64.b64decode(body["instances"][0]["image"]["bytesBase64Encoded"]) == scene.photo.read_bytes()
+    assert body["parameters"]["durationSeconds"] == 6
+    assert body["parameters"]["personGeneration"] == "allow_adult"
+    # A chave do GEMINI_API_KEY vai no cabeçalho, nunca na URL; GOOGLE_API_KEY e Vertex não valem.
+    assert all(r.headers.get("x-goog-api-key") == KEY for r in sdk_server.requests)
+    assert all(KEY not in str(r.url) for r in sdk_server.requests)
+    assert all(str(r.url).startswith("https://generativelanguage.googleapis.com/") for r in sdk_server.requests)
+
+
+@pytest.mark.parametrize("failure", [500, 504, "read_timeout"])
+def test_real_sdk_ambiguous_submit_failure_sends_exactly_one_post(
+    go: Callable[..., Any], sdk_server: SdkServer, failure: int | str
+) -> None:
+    sdk_server.post_script = [failure] * 5
+    err = provider_error(go, None)
+    assert sdk_server.posts == 1  # nem o SDK nem o adaptador reenviam o POST pago
+    assert (err.transient, err.billed_units, err.provider_job_id) == (False, 6.0, None)
+    assert sdk_server.polls == 0 and sdk_server.downloads == 0
+
+
+@pytest.mark.parametrize("failure", [429, 503, "connect"])
+def test_real_sdk_refused_submit_posts_only_our_three_attempts(
+    go: Callable[..., Any], sdk_server: SdkServer, failure: int | str
+) -> None:
+    # Recusados antes do aceite: só o retry_before_accept do adaptador reenvia (3 tentativas); o SDK não soma.
+    sdk_server.post_script = [failure] * 9
+    err = provider_error(go, None)
+    assert sdk_server.posts == 3
+    assert (err.transient, err.billed_units, err.provider_job_id) == (True, 0.0, None)
+
+
+def test_real_sdk_rejected_submit_4xx_sends_one_post(go: Callable[..., Any], sdk_server: SdkServer) -> None:
+    sdk_server.post_script = [400] * 5
+    err = provider_error(go, None)
+    assert sdk_server.posts == 1
+    assert (err.transient, err.billed_units, err.provider_job_id) == (False, 0.0, None)
+
+
+def test_real_sdk_429_then_success_charges_one_accepted_job(go: Callable[..., Any], sdk_server: SdkServer) -> None:
+    sdk_server.post_script = [429]
+    result, _t, _r = go(None)
+    assert sdk_server.posts == 2 and result.provider_job_id == JOB
+
+
+def test_real_sdk_poll_and_download_hiccups_never_resend_the_post(
+    go: Callable[..., Any], sdk_server: SdkServer
+) -> None:
+    sdk_server.poll_script = [503]
+    sdk_server.download_script = [503, "read_timeout"]
+    result, _t, req = go(None)
+    assert sdk_server.posts == 1
+    assert sdk_server.polls == 3 and sdk_server.downloads == 3
+    assert result.provider_job_id == JOB and req.out_path.is_file()
+
+
+def test_real_sdk_download_that_never_works_is_post_accept_failure(
+    go: Callable[..., Any], sdk_server: SdkServer
+) -> None:
+    sdk_server.download_script = [503] * 9
+    err = provider_error(go, None)
+    assert sdk_server.posts == 1 and sdk_server.downloads == 3
+    assert (err.transient, err.billed_units, err.provider_job_id) == (False, 6.0, JOB)

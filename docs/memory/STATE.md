@@ -16,12 +16,13 @@ Atualizado: 2026-11-02
 - [x] **T2 concluída e aprovada** (evidências 08 e 09): contrato dos adaptadores, registry, helper de contrato endurecido e `fake`. **344 testes verdes**.
 - [x] **T3 (roteiro + harness) e T5 (ffmpeg + Ken Burns) concluídas e aprovadas** (evidência 10, ADR-007). **544 testes verdes**.
 - [x] **T6 (parallax 2,5D) e T7 (montagem + QC) concluídas e aprovadas** (evidência 11, ADR-008). **655 testes verdes** (~90 s).
-- [ ] **PRÓXIMO PASSO: {T8 (Veo), T9 (Gemini Omni)}** com mocks, sem chamada paga; depois T4 (CLI) e T12 (aceitação). Pendências: evidência 09 (T8/T9: falhas transient/pós-aceite, `max_client_calls` exato, construtor não lê o client); evidência 10 (T4: runs vazios, `exc.verion_run_id`, exit codes); `short_clips` base 0; `extract` → `QcFrames`; mypy em `ledger/repo.py:349`; suíte < 120 s.
+- [x] **T8 (Veo) e T9 (Gemini Omni) concluídas e aprovadas com mocks** (evidência 12, ADR-009). **860 testes verdes** (~83 s). Veo preview descontinuado → Omni é o provedor pago principal.
+- [ ] **PRÓXIMO PASSO: T4 (CLI)** e depois **T12 (aceitação ponta a ponta)**. Pendências para a T4: evidência 10 (runs vazios no relatório, `exc.verion_run_id`, exit codes), `short_clips` base 0, `extract` → `QcFrames`, client injetado deve usar `make_http_options`; mypy em `ledger/repo.py:349`; suíte < 120 s. T10 (Kling) e T11 (Wan) seguem bloqueadas por decisão do usuário.
 - [ ] Depois: {T3, T5, T8, T9} → {T6, T7} → T4 → T12. T10/T11 bloqueadas por decisão do usuário.
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 
 ## Autorizações de gasto
-Nenhuma. Chamadas pagas (Veo, Kling, GPU) estão **bloqueadas** até o usuário autorizar o orçamento da Fase 0 (proposta: até R$ 350).
+Nenhuma. Chamadas pagas (Gemini Omni, Veo, Kling, GPU) estão **bloqueadas** até o usuário autorizar o orçamento da Fase 0 (proposta: até R$ 350).
 
 ## Decisões de produto pendentes (usuário)
 1. Cliente-alvo inicial (proposta: gestoras de temporada e imobiliárias de alto padrão)

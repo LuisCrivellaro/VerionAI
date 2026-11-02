@@ -1,5 +1,21 @@
 # Decisões (a mais recente no topo)
 
+## 2026-11-02 · ADR-009 · Gemini Omni como provedor pago principal; regras de dinheiro dos adaptadores
+- **Veo descontinuado:** a documentação oficial dá o `veo-3.1-fast-generate-preview` como desligado desde 22/10/2026, e o substituto indicado é o `gemini-omni-1.1-flash`.
+- **Provedor principal da Fase 0:** o Omni. O adaptador do Veo fica no código, mas só é usado se um ID GA confirmado for configurado.
+- **Plano do MVP:** a comparação "Veo × Kling" vira "Omni × Kling/Wan".
+- **Chave:** só `GEMINI_API_KEY`, com `vertexai=False` fixo. Vertex exigiria outro client, outra chave e outro preço, e uma nova decisão.
+- **Retry interno do SDK desligado** (`HttpRetryOptions(attempts=1, http_status_codes=[599])`):
+  - Erros ambíguos depois do envio (408, 5xx exceto 503, timeout de leitura) são faturados com a duração pedida e **nunca reenviados**.
+  - Recusas sem job (429, 503, falha de conexão antes do envio) podem ser repetidas pelo `retry_before_accept` (até 3).
+- **Cobrança por clipe:** `units = max(medido, pedido)`, uma escolha conservadora (pode superestimar).
+- **Ressalvas da reserva:** o excesso por tentativa é limitado ao máximo do modelo (8 a 10 s). O `settle_ok` ainda não tem teto contra a reserva (follow-up no harness).
+- **Pré-requisitos da 1ª chamada paga:**
+  - preço oficial do Omni em 1080p (o `prices.toml` hoje traz uma hipótese de 720p);
+  - confirmar que o upload da Files API é gratuito;
+  - liberar `generativelanguage.googleapis.com` no proxy;
+  - autorização do usuário.
+
 ## 2026-11-02 · ADR-008 · Parallax por warp contínuo, encoder com prazo e QC com último quadro
 - **Parallax 2,5D:**
   - É um backward warp contínuo por pixel, não "por camada" como dizia a spec. Assim não há buracos nem fantasmas.

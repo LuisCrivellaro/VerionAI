@@ -3,13 +3,18 @@
 Fluxo de ``generate`` (síncrono, com polling interno):
 
 1. ``token.consume`` (primeira instrução); valida a foto; cria o client real só agora, se nenhum foi
-   injetado (a chave vem do ambiente, lida pelo próprio SDK; o construtor não lê chave nem client).
+   injetado: ``genai.Client(vertexai=False, api_key=os.environ["GEMINI_API_KEY"], http_options=...)``,
+   com ``ConfigError`` se a variável faltar (``GOOGLE_GENAI_USE_VERTEXAI`` e ``GOOGLE_API_KEY`` do ambiente
+   são ignoradas de propósito). O construtor não lê chave nem client. As opções HTTP trazem timeout de
+   120 s por chamada e ``HttpRetryOptions(attempts=1, http_status_codes=[599])``: o SDK não reenvia POST.
 2. ``client.models.generate_videos(model=, source=GenerateVideosSource(prompt, image), config=)``
    dentro de ``retry_before_accept``: retry com backoff SÓ enquanto nada foi aceito.
-3. ``token.job_accepted(operation.name)`` logo que o provedor devolve a operação.
+3. ``token.job_accepted(operation.name)`` logo que o provedor devolve a operação. Se gravar o id no
+   ledger falhar (ex.: ``sqlite3.OperationalError``), vira falha pós-aceite com o id na mensagem.
 4. Polling: ``client.operations.get(operation)`` a cada ``poll_interval_s`` até ``operation.done``
    ou até o prazo ``timeout_s`` (``sleep`` e ``clock`` injetáveis).
-5. ``client.files.download(file=video, destination=<out>.part)``, ``ffprobe`` e ``os.replace`` para
+5. ``client.files.download(file=video, destination=<out>.part)`` (até 3 tentativas com backoff, pois é
+   grátis e idempotente; 4xx permanente não é repetido), ``ffprobe`` e ``os.replace`` para
    ``req.out_path``. O MP4 é o do provedor, sem normalização (a montagem faz R2).
 
 Classificação de falhas (decisão do supervisor, evidência 09):
@@ -17,9 +22,9 @@ Classificação de falhas (decisão do supervisor, evidência 09):
 - ANTES do aceite: 429 e 503 do provedor e falhas de conexão com prova de envio não realizado
   (``httpx.ConnectError``/``ConnectTimeout``, ``ConnectionRefusedError``, DNS) viram
   ``ProviderError(transient=True, billed_units=0, provider_job_id=None)``, repetíveis por
-  ``retry_before_accept``. Erros permanentes (4xx) e ambíguos (timeout de leitura, 500/502/504, em
-  que o POST pode ter chegado) viram ``transient=False, billed_units=0``: não são repetidos. O ledger
-  mantém a reserva inteira em qualquer erro (``settle_error``: custo = max(faturado, reserva)).
+  ``retry_before_accept``. Erros permanentes (4xx) viram ``transient=False, billed_units=0``. Erros
+  AMBÍGUOS (timeout de leitura, 500/502/504: o POST pode ter chegado e sido faturado) viram
+  ``transient=False, billed_units=<segundos pedidos>, provider_job_id=None``: não são repetidos.
 - DEPOIS do aceite (prazo de polling, operação com erro, vídeo filtrado, download ou arquivo
   inválido, qualquer exceção): NUNCA transient e nunca reenvia. ``billed_units`` = segundos
   PEDIDOS (conservador) e ``provider_job_id`` = nome da operação. A doc oficial diz que vídeo
@@ -27,12 +32,18 @@ Classificação de falhas (decisão do supervisor, evidência 09):
 - Falhas transitórias de CONSULTA (GET idempotente: 429, 5xx, rede) são toleradas até
   ``_MAX_POLL_FAILURES`` seguidas; não duplicam cobrança.
 
-``units`` do resultado = duração do MP4 baixado (``ffprobe``), em ``video_seconds``;
-``cost_is_estimate=True`` porque a API não devolve o consumo faturado.
+``units`` do resultado = ``max(duração medida do MP4 (ffprobe), segundos pedidos)``, em ``video_seconds``
+(nunca abaixo do pedido: conservador). ``meta`` leva ``requested_s`` e ``measured_s``, e ``warning`` se o
+medido passar do pedido em mais de 1 s. ``cost_is_estimate=True`` porque a API não devolve o consumo.
+
+Segredos: toda mensagem de ``ProviderError`` passa por ``_redact`` (chaves ``AIza...``, ``Bearer``,
+``?key=``, ``x-goog-api-key``). A exceção original fica só em ``__cause__``.
 
 CONFIRMADO no SDK instalado (google-genai 2.34.0, inspeção offline; ver ``tests/providers/test_veo.py``):
 assinaturas de ``models.generate_videos``, ``operations.get`` e ``files.download``; campos da operação;
-no modo Gemini Developer API o SDK REJEITA ``seed``, ``fps``, ``generate_audio`` e outros (``ValueError``),
+o fio real (``genai.Client`` sobre ``httpx.MockTransport``: ``POST ...:predictLongRunning``,
+``GET .../operations/<id>``, ``GET <video.uri>``, chave no cabeçalho ``x-goog-api-key``) e que o caminho
+clássico de vídeo faz 1 POST em 429/500/503/504/timeout; no modo Gemini Developer API o SDK REJEITA ``seed``, ``fps``, ``generate_audio`` e outros (``ValueError``),
 por isso ``SceneRequest.seed`` é ignorado aqui (o Veo não é reprodutível por semente nesse modo).
 
 CONFIRMADO na doc oficial (ai.google.dev/gemini-api/docs/veo, lida em 2026-11-02): IDs
@@ -53,6 +64,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -83,6 +95,15 @@ _ASPECT_RATIO: Final = "16:9"
 _PERSON_GENERATION: Final = "allow_adult"  # único valor aceito em imagem para vídeo (doc oficial)
 _CALL_TIMEOUT_MS: Final = 120_000  # timeout HTTP de cada chamada do client criado aqui
 _MAX_POLL_FAILURES: Final = 3
+_DOWNLOAD_ATTEMPTS: Final = 3  # o download é grátis e idempotente; a geração nunca é reenviada
+_DOWNLOAD_BACKOFF_S: Final = 2.0  # 2 s, 4 s entre as tentativas
+_OVERRUN_TOLERANCE_S: Final = 1.0  # medido > pedido + 1 s vira aviso em meta
+_REASON_MAX_CHARS: Final = 400
+_API_KEY_ENV: Final = "GEMINI_API_KEY"
+_SECRET_RE: Final = re.compile(r"AIza[0-9A-Za-z_\-]{30,}|AQ\.[0-9A-Za-z_\-]{20,}|ya29\.[0-9A-Za-z_\-]+")
+_BEARER_RE: Final = re.compile(r"Bearer\s+[A-Za-z0-9_\-.]+", re.IGNORECASE)
+_QUERY_SECRET_RE: Final = re.compile(r"([?&](?:key|api_key|apiKey|access_token|auth|signature)=)[^&\s\"'<>()]+")
+_HEADER_SECRET_RE: Final = re.compile(r"(x-goog-api-key['\"]?\s*[:=]\s*['\"]?)[^\s,'\"}]+", re.IGNORECASE)
 _MIME_BY_SUFFIX: Final = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 _TRANSIENT_CODES: Final = (429, 503)
 
@@ -144,7 +165,7 @@ class VeoAdapter:
         source = gtypes.GenerateVideosSource(prompt=scene.prompt, image=image)
 
         def submit() -> Any:
-            return self._submit(client, source, config)
+            return self._submit(client, source, config, requested)
 
         operation = retry_before_accept(submit, sleep=self._sleep)
 
@@ -156,7 +177,14 @@ class VeoAdapter:
                 transient=False,
                 billed_units=float(requested),
             )
-        token.job_accepted(job_id)
+        try:
+            token.job_accepted(job_id)
+        except Exception as exc:  # ex.: sqlite3.OperationalError: o job existe e já pode estar faturado
+            raise _after_accept(
+                f"o job foi aceito, mas o id não pôde ser gravado no ledger ({exc!r}); anote-o",
+                job_id,
+                requested,
+            ) from exc
         try:
             done = self._await(client, operation, job_id, requested)
             video = _extract_video(done, job_id, requested)
@@ -178,32 +206,46 @@ class VeoAdapter:
         return SUPPORTED_DURATIONS_S[-1]
 
     def _get_client(self) -> Any:
-        """O client real nasce aqui (depois do ``consume``), com a chave do ambiente lida pelo SDK."""
+        """O client real nasce aqui (depois do ``consume``), sempre no Gemini API e com ``GEMINI_API_KEY``.
+
+        ``vertexai=False`` e ``api_key`` explícitos: ``GOOGLE_GENAI_USE_VERTEXAI`` e ``GOOGLE_API_KEY`` do
+        ambiente (esta tem precedência no SDK) não mudam nem a plataforma nem a chave.
+        """
         if self._client is None:
-            try:
-                self._client = genai.Client(http_options=gtypes.HttpOptions(timeout=_CALL_TIMEOUT_MS))
-            except ValueError as exc:
-                raise ConfigError(
-                    "chave de API do Gemini ausente ou inválida: defina GEMINI_API_KEY no ambiente"
-                ) from exc
+            api_key = os.environ.get(_API_KEY_ENV, "").strip()
+            if not api_key:
+                raise ConfigError(f"chave da Gemini API ausente: defina {_API_KEY_ENV} no ambiente")
+            self._client = genai.Client(vertexai=False, api_key=api_key, http_options=_http_options())
         return self._client
 
-    def _submit(self, client: Any, source: Any, config: Any) -> Any:
+    def _submit(self, client: Any, source: Any, config: Any, requested: int) -> Any:
+        """Uma submissão. Ambíguo (o POST pode ter chegado): sem retry e ``billed_units`` = segundos pedidos."""
         try:
             return client.models.generate_videos(model=self.model, source=source, config=config)
         except genai_errors.APIError as exc:
-            transient = exc.code in _TRANSIENT_CODES
-            unsure = "" if exc.code < 500 or transient else " (o pedido pode ter sido aceito)"
+            if exc.code in _TRANSIENT_CODES:  # o provedor recusou: nenhuma operação foi criada
+                raise ProviderError(
+                    _redact(f"Veo recusou o pedido: HTTP {exc.code} {exc.status}: {exc.message}"),
+                    transient=True,
+                ) from exc
+            ambiguous = exc.code >= 500
             raise ProviderError(
-                f"Veo recusou o pedido: HTTP {exc.code} {exc.status}: {exc.message}{unsure}",
-                transient=transient,
+                _redact(
+                    f"Veo recusou o pedido: HTTP {exc.code} {exc.status}: {exc.message}"
+                    + (" (o pedido pode ter sido aceito e faturado)" if ambiguous else "")
+                ),
+                transient=False,
+                billed_units=float(requested) if ambiguous else 0.0,
             ) from exc
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-            raise ProviderError(f"sem conexão com o Veo antes do envio: {exc}", transient=True) from exc
+            raise ProviderError(
+                _redact(f"sem conexão com o Veo antes do envio: {exc}"), transient=True
+            ) from exc
         except (httpx.TransportError, TimeoutError) as exc:
             raise ProviderError(
-                f"falha de rede ao enviar o pedido ao Veo; o pedido pode ter sido aceito e faturado: {exc}",
+                _redact(f"falha de rede ao enviar o pedido ao Veo; o pedido pode ter sido aceito e faturado: {exc}"),
                 transient=False,
+                billed_units=float(requested),
             ) from exc
 
     def _await(self, client: Any, operation: Any, job_id: str, requested: int) -> Any:
@@ -230,7 +272,7 @@ class VeoAdapter:
             if video.video_bytes:  # HIPÓTESE: modo Vertex/Enterprise pode devolver os bytes na resposta
                 part.write_bytes(video.video_bytes)
             else:
-                client.files.download(file=video, destination=str(part))
+                self._download(client, video, part)
             info = ffmpeg.probe(part)
             fps = info.fps_value
             if not all(math.isfinite(v) and v > 0 for v in (info.duration_s, info.width, info.height, fps)):
@@ -239,23 +281,42 @@ class VeoAdapter:
         except Exception as exc:
             part.unlink(missing_ok=True)
             raise _after_accept(f"falha ao baixar ou validar o vídeo ({exc!r})", job_id, requested) from exc
+        meta = {
+            "model": self.model,
+            "resolution": self._resolution,
+            "aspect_ratio": _ASPECT_RATIO,
+            "requested_s": str(requested),
+            "measured_s": f"{info.duration_s:.3f}",
+        }
+        if info.duration_s > requested + _OVERRUN_TOLERANCE_S:
+            meta["warning"] = (
+                f"vídeo medido ({info.duration_s:.3f} s) maior que o pedido ({requested} s): "
+                "faturado pelo medido; conferir no console"
+            )
         return SceneResult(
             clip_path=out_path,
             duration_s=info.duration_s,
             width=info.width,
             height=info.height,
             fps=fps,
-            units=info.duration_s,
+            units=max(info.duration_s, float(requested)),  # conservador: nunca abaixo do que foi pedido
             unit_kind=self._prices.unit_kind_of(self.method),
             cost_is_estimate=True,  # a API não devolve o consumo faturado
             provider_job_id=job_id,
-            meta={
-                "model": self.model,
-                "resolution": self._resolution,
-                "aspect_ratio": _ASPECT_RATIO,
-                "requested_s": str(requested),
-            },
+            meta=meta,
         )
+
+    def _download(self, client: Any, video: Any, part: Path) -> None:
+        """Baixa o vídeo com até ``_DOWNLOAD_ATTEMPTS`` tentativas (grátis e idempotente), sem reenviar a geração."""
+        for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+            try:
+                client.files.download(file=video, destination=str(part))
+                return
+            except Exception as exc:
+                part.unlink(missing_ok=True)  # descarta o arquivo parcial
+                if attempt == _DOWNLOAD_ATTEMPTS or _permanent_http_error(exc):
+                    raise
+                self._sleep(_DOWNLOAD_BACKOFF_S * 2 ** (attempt - 1))
 
 
 # --- helpers sem estado ----------------------------------------------------------------------
@@ -274,10 +335,37 @@ def _load_image(photo: Path) -> Any:
     return gtypes.Image(image_bytes=data, mime_type=mime)
 
 
+def _http_options() -> gtypes.HttpOptions:
+    """Timeout por chamada e NENHUM reenvio automático do SDK (``attempts=1``; 599 não é status real).
+
+    Medido offline: no caminho clássico de vídeo o SDK instalado já faz 1 POST em 429/5xx/timeout; fixar
+    aqui evita que uma versão futura reenvie sozinha a submissão paga.
+    """
+    return gtypes.HttpOptions(
+        timeout=_CALL_TIMEOUT_MS,
+        retry_options=gtypes.HttpRetryOptions(attempts=1, http_status_codes=[599]),
+    )
+
+
+def _redact(text: str) -> str:
+    """Remove chaves de API, tokens e segredos de query/cabeçalho de um texto de erro; limita o tamanho."""
+    text = _SECRET_RE.sub("[REDACTED_KEY]", text)
+    text = _BEARER_RE.sub("Bearer [REDACTED_TOKEN]", text)
+    text = _QUERY_SECRET_RE.sub(r"\1[REDACTED]", text)
+    text = _HEADER_SECRET_RE.sub(r"\1[REDACTED]", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= _REASON_MAX_CHARS else text[: _REASON_MAX_CHARS - 3] + "..."
+
+
+def _permanent_http_error(exc: Exception) -> bool:
+    """4xx que o provedor devolveu por recusar o pedido (não adianta repetir); 408 e 429 ficam de fora."""
+    return isinstance(exc, genai_errors.APIError) and 400 <= exc.code < 500 and exc.code not in (408, 429)
+
+
 def _after_accept(reason: str, job_id: str, requested: int) -> ProviderError:
     """Falha com o job já aceito: sem retry, faturada pelo pior caso (segundos pedidos), com o id."""
     return ProviderError(
-        f"Veo, job {job_id}: {reason}. Já aceito pelo provedor: tratado como faturado "
+        f"Veo, job {job_id}: {_redact(reason)}. Já aceito pelo provedor: tratado como faturado "
         f"({requested} s). O vídeo, se existir, fica 2 dias no servidor; confira no console.",
         transient=False,
         billed_units=float(requested),

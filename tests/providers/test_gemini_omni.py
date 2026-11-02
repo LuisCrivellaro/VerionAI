@@ -42,7 +42,7 @@ from verion.providers.base import (
     SceneResult,
 )
 from verion.providers.contract import SpyClient, assert_generator_contract
-from verion.providers.gemini_omni import GeminiOmniAdapter
+from verion.providers.gemini_omni import GeminiOmniAdapter, make_http_options
 from verion.providers.registry import METHODS, create
 
 FileState = genai_types.FileState
@@ -275,6 +275,9 @@ def run_id(new_run: Callable[..., int]) -> int:
     return new_run("gemini-omni-1.1-flash")
 
 
+_DEFAULT: Any = object()  # "use o mock do fixture"; ``None`` significa "sem client" (o real nasce no generate)
+
+
 class Env:
     """Agrupa o necessário para gerar uma cena com o mock e inspecionar o ledger."""
 
@@ -292,20 +295,20 @@ class Env:
         self.out_dir, self.clock, self.client = out_dir, fake_clock, client
         self.sleeps: list[float] = []
 
-    def gen(self, *, client: object | None = None, deadline_s: float = 900.0) -> GeminiOmniAdapter:
+    def gen(self, *, client: object | None = _DEFAULT, deadline_s: float = 900.0) -> GeminiOmniAdapter:
         return adapter_for(
             self.prices,
-            self.client if client is None else client,
+            self.client if client is _DEFAULT else client,
             self.clock,
             deadline_s=deadline_s,
             sleeps=self.sleeps,
         )
 
     def run(
-        self, *, scene: Scene | None = None, deadline_s: float = 900.0
+        self, *, scene: Scene | None = None, deadline_s: float = 900.0, client: object | None = _DEFAULT
     ) -> tuple[SceneResult, SpendToken]:
         scene = scene or self.scene
-        gen = self.gen(deadline_s=deadline_s)
+        gen = self.gen(client=client, deadline_s=deadline_s)
         token = reserve_for(self.conn, self.prices, gen, scene, self.run_id)
         req = SceneRequest(
             scene=scene,
@@ -315,9 +318,11 @@ class Env:
         )
         return gen.generate(req, token), token
 
-    def fail(self, *, scene: Scene | None = None, deadline_s: float = 900.0) -> tuple[ProviderError, SpendToken]:
+    def fail(
+        self, *, scene: Scene | None = None, deadline_s: float = 900.0, client: object | None = _DEFAULT
+    ) -> tuple[ProviderError, SpendToken]:
         scene = scene or self.scene
-        gen = self.gen(deadline_s=deadline_s)
+        gen = self.gen(client=client, deadline_s=deadline_s)
         token = reserve_for(self.conn, self.prices, gen, scene, self.run_id)
         req = SceneRequest(
             scene=scene,
@@ -434,6 +439,7 @@ def test_real_client_is_built_lazily_after_consume_and_only_once(
         built.append(kwargs)
         return env.client
 
+    monkeypatch.setenv("GEMINI_API_KEY", "chave-ficticia-de-teste")
     monkeypatch.setattr(genai, "Client", factory)
     gen = adapter_for(env.prices, None, env.clock)
     token = reserve_for(env.conn, env.prices, gen, env.scene, env.run_id)
@@ -441,9 +447,28 @@ def test_real_client_is_built_lazily_after_consume_and_only_once(
     req = SceneRequest(env.scene, env.run_id, token.attempt_no, env.out_dir / "a.mp4")
     gen.generate(req, token)
     assert len(built) == 1
-    http_options = built[0]["http_options"]
+    kwargs = built[0]
+    assert kwargs["vertexai"] is False  # nunca GOOGLE_GENAI_USE_VERTEXAI
+    assert kwargs["api_key"] == "chave-ficticia-de-teste"
+    assert set(kwargs) == {"vertexai", "api_key", "http_options"}
+    http_options = kwargs["http_options"]
     assert http_options.timeout == 900 * 1000  # milissegundos
-    assert "api_key" not in built[0]  # a chave vem do ambiente, lida pelo SDK
+    assert http_options.retry_options.attempts == 1  # o SDK não reenvia o POST pago
+    assert http_options.retry_options.http_status_codes == [599]
+
+
+def test_client_uses_gemini_api_key_even_with_vertex_and_google_api_key_in_the_environment(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[dict[str, Any]] = []
+    monkeypatch.setenv("GEMINI_API_KEY", "chave-gemini")
+    monkeypatch.setenv("GOOGLE_API_KEY", "outra-chave")
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setattr(genai, "Client", lambda **kw: built.append(kw) or env.client)
+    gen = adapter_for(env.prices, None, env.clock)
+    token = reserve_for(env.conn, env.prices, gen, env.scene, env.run_id)
+    gen.generate(SceneRequest(env.scene, env.run_id, token.attempt_no, env.out_dir / "a.mp4"), token)
+    assert built[0]["api_key"] == "chave-gemini" and built[0]["vertexai"] is False
 
 
 def test_real_client_is_not_built_when_the_token_is_refused(
@@ -461,13 +486,19 @@ def test_real_client_is_not_built_when_the_token_is_refused(
         gen.generate(req, token)
 
 
-def test_missing_api_key_is_a_config_error_with_no_spend_signal(
-    env: Env, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_missing_gemini_api_key_is_a_config_error_even_with_google_api_key_set(
+    env: Env, monkeypatch: pytest.MonkeyPatch, value: str | None
 ) -> None:
-    def no_key(**kwargs: Any) -> object:
-        raise ValueError("No API key was provided.")
+    def boom(**kwargs: Any) -> object:
+        raise AssertionError("genai.Client não pode ser criado sem GEMINI_API_KEY")
 
-    monkeypatch.setattr(genai, "Client", no_key)
+    if value is None:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("GEMINI_API_KEY", value)
+    monkeypatch.setenv("GOOGLE_API_KEY", "nao-vale")  # não pode ser usada no lugar
+    monkeypatch.setattr(genai, "Client", boom)
     gen = adapter_for(env.prices, None, env.clock)
     token = reserve_for(env.conn, env.prices, gen, env.scene, env.run_id)
     req = SceneRequest(env.scene, env.run_id, token.attempt_no, env.out_dir / "a.mp4")
@@ -609,14 +640,34 @@ def test_requested_duration_is_an_integer_string_in_3_to_10(
     assert result.units == pytest.approx(float(expected[:-1]), abs=0.1)
 
 
-def test_units_are_the_seconds_of_the_downloaded_file_not_the_requested_ones(
+def test_units_never_drop_below_the_requested_seconds_and_keep_the_measured_ones_in_meta(
     env: Env, make_clip: Callable[[int], Path]
 ) -> None:
-    env.client.clip = make_clip(4)  # pediu 5 s, o provedor entregou 4 s
+    env.client.clip = make_clip(4)  # pediu 5 s, o provedor entregou 4 s: o faturamento por segundo é incerto
     result, token = env.run()
-    assert result.units == pytest.approx(4.0, abs=0.1)
+    assert result.units == 5.0  # max(medido, pedido)
+    assert float(result.meta["measured_s"]) == pytest.approx(4.0, abs=0.1)
+    assert result.duration_s == pytest.approx(4.0, abs=0.1)  # a duração do clipe continua a medida
+    assert "over_requested" not in result.meta
     assert result.meta["duration_requested_s"] == "5"
     assert env.job_id_in_ledger(token) == JOB_ID
+
+
+def test_units_follow_the_measured_seconds_when_longer_and_flag_a_big_excess(
+    env: Env, make_clip: Callable[[int], Path]
+) -> None:
+    env.client.clip = make_clip(7)  # pediu 5 s, veio 7 s (> pedido + 1 s)
+    result, _ = env.run()
+    assert result.units == pytest.approx(7.0, abs=0.1)
+    assert float(result.meta["measured_s"]) == pytest.approx(7.0, abs=0.1)
+    assert result.meta["over_requested"] == "true"
+
+
+def test_a_one_second_excess_is_not_flagged(env: Env, make_clip: Callable[[int], Path]) -> None:
+    env.client.clip = make_clip(6)  # exatamente pedido + 1 s
+    result, _ = env.run()
+    assert result.units == pytest.approx(6.0, abs=0.1)
+    assert "over_requested" not in result.meta
 
 
 def test_input_and_output_files_are_polled_until_active_with_backoff(env: Env) -> None:
@@ -733,31 +784,7 @@ def test_polling_survives_a_blip_in_files_get_for_the_input(env: Env) -> None:
     assert result.provider_job_id == JOB_ID
 
 
-@pytest.mark.parametrize("code", [429, 503])
-def test_create_refused_with_429_or_503_is_retried_then_succeeds(env: Env, code: int) -> None:
-    env.client.create_errors = [api_error(code), None]
-    result, token = env.run()
-    assert env.client.events.count("create") == 2
-    assert env.client.events.count("upload") == 1  # a foto não é reenviada
-    assert env.job_id_in_ledger(token) == result.provider_job_id == JOB_ID
-    assert len(env.sleeps) == 1
-
-
-def test_create_refused_forever_is_transient_unbilled_after_bounded_retries(env: Env) -> None:
-    env.client.create_errors = [api_error(503, "UNAVAILABLE")] * 5
-    exc, token = env.fail()
-    assert_pre_accept(exc, token, env)
-    assert env.client.events.count("create") == 3  # limite de tentativas de retry_before_accept
-    assert "download" not in env.client.events
-
-
-@pytest.mark.parametrize("code", [400, 401, 403, 404])
-def test_create_rejected_with_4xx_is_pre_accept_and_not_retried(env: Env, code: int) -> None:
-    env.client.create_errors = [api_error(code)] * 3
-    exc, token = env.fail()
-    assert_pre_accept(exc, token, env)
-    assert env.client.events.count("create") == 1
-    assert env.sleeps == []
+# (os erros do ``interactions.create`` com o SDK real estão na seção "SDK real", mais abaixo)
 
 
 def test_connection_refused_on_create_is_pre_accept(env: Env) -> None:
@@ -791,10 +818,6 @@ def assert_post_accept(exc: ProviderError, token: SpendToken, env: Env, job_id: 
         TimeoutError("sem resposta"),
         httpx.ReadTimeout("sem resposta"),
         ConnectionResetError("reset no meio"),
-        api_error(500, "INTERNAL"),
-        api_error(502, "BAD_GATEWAY"),
-        api_error(504, "DEADLINE_EXCEEDED"),
-        api_error(408, "TIMEOUT"),
         RuntimeError("inesperado"),
     ],
     ids=lambda e: f"{type(e).__name__}",
@@ -810,7 +833,7 @@ def test_ambiguous_create_failure_is_billed_conservatively_without_resending(
 
 
 @pytest.mark.parametrize(
-    "status", ["failed", "cancelled", "incomplete", "budget_exceeded", "in_progress", "queued", "requires_action"]
+    "status", ["failed", "cancelled", "incomplete", "budget_exceeded", "in_progress", "queued", "requires_action", "requires_continuation"]
 )
 def test_interaction_not_completed_is_post_accept_failure_with_the_job_id(env: Env, status: str) -> None:
     env.client.create_response = interaction(status=status)
@@ -952,21 +975,37 @@ def test_error_messages_never_leak_an_api_key(env: Env) -> None:
 # --- SDK real, rede substituída por um transporte local ------------------------------------------
 
 
-def test_real_sdk_accepts_the_calls_and_serializes_the_request_offline(
-    env: Env, clip5: Path
-) -> None:
-    """Prova de nomes e formatos contra o SDK instalado, sem rede: ``httpx.MockTransport`` no lugar do HTTP.
+class SdkServer:
+    """Servidor fictício (``httpx.MockTransport``) de Files + Interactions para o ``genai.Client`` REAL.
 
-    Confirma que ``files.upload/get/download`` e ``interactions.create`` existem com estes parâmetros e que o
-    corpo enviado ao provedor tem first-frame, prompt, duração, 1080p e entrega por URI. O que o servidor real
-    responde continua HIPÓTESE (as respostas aqui são escritas à mão a partir da documentação).
+    ``create_script`` define a resposta de cada POST em ``/v1beta/interactions`` (status HTTP, ``"connect"``
+    ou ``"read"``); esgotado, responde sucesso. ``posts`` conta os POSTs que chegaram ao "provedor". As
+    respostas de sucesso são escritas à mão a partir da documentação: o que o servidor real faz é HIPÓTESE.
     """
-    bodies: list[bytes] = []
-    clip_bytes = clip5.read_bytes()
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def __init__(self, clip: Path) -> None:
+        self.clip_bytes = clip.read_bytes()
+        self.create_script: list[int | str] = []
+        self.upload_script: list[int] = []
+        self.posts = 0
+        self.upload_starts = 0
+        self.bodies: list[bytes] = []
+
+    def client(self, *, options: genai_types.HttpOptions | None = None) -> genai.Client:
+        http = httpx.Client(transport=httpx.MockTransport(self.handler))
+        opts = make_http_options(900.0, httpx_client=http) if options is None else options
+        return genai.Client(vertexai=False, api_key="chave-ficticia-de-teste", http_options=opts)
+
+    @staticmethod
+    def _error(status: int) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"code": status, "message": "falha simulada", "status": "ERR"}})
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if "/upload/v1beta/files" in url and request.headers.get("x-goog-upload-command") == "start":
+            self.upload_starts += 1
+            if self.upload_script and (status := self.upload_script.pop(0)) != 200:
+                return self._error(status)
             return httpx.Response(
                 200,
                 headers={
@@ -983,34 +1022,188 @@ def test_real_sdk_accepts_the_calls_and_serializes_the_request_offline(
         if request.method == "GET" and url.endswith("files/in1"):
             return httpx.Response(200, json={"name": IN_NAME, "uri": IN_URI, "state": "ACTIVE"})
         if request.method == "POST" and url.endswith("/v1beta/interactions"):
-            bodies.append(request.content)
+            self.posts += 1
+            self.bodies.append(request.content)
+            step = self.create_script.pop(0) if self.create_script else 200
+            if step == "connect":
+                raise httpx.ConnectError("sem rota", request=request)
+            if step == "connect_timeout":
+                raise httpx.ConnectTimeout("sem rota (timeout)", request=request)
+            if step == "read":
+                raise httpx.ReadTimeout("lento demais", request=request)
+            assert isinstance(step, int)
+            if step != 200:
+                return self._error(step)
             return httpx.Response(
                 200,
                 json={
                     "id": JOB_ID,
                     "status": "completed",
-                    "steps": [{"type": "model_output", "content": [{"type": "video", "uri": OUT_URI, "mime_type": "video/mp4"}]}],
+                    "steps": [
+                        {
+                            "type": "model_output",
+                            "content": [{"type": "video", "uri": OUT_URI, "mime_type": "video/mp4"}],
+                        }
+                    ],
                 },
             )
         if request.method == "GET" and url.endswith("files/zz9"):
             return httpx.Response(200, json={"name": OUT_NAME, "state": "ACTIVE"})
         if ":download" in url:
-            return httpx.Response(200, content=clip_bytes)
-        return httpx.Response(404, json={"error": {"code": 404, "message": "inesperado", "status": "NOT_FOUND"}})
+            return httpx.Response(200, content=self.clip_bytes)
+        return self._error(404)
 
-    sdk = genai.Client(
-        api_key="chave-ficticia-de-teste",
-        http_options=genai_types.HttpOptions(httpx_client=httpx.Client(transport=httpx.MockTransport(handler))),
-    )
-    gen = adapter_for(env.prices, sdk, env.clock)
+
+@pytest.fixture
+def server(clip5: Path, monkeypatch: pytest.MonkeyPatch) -> SdkServer:
+    # Rede de segurança: se o SDK tentar dormir entre reenvios, o teste não espera de verdade.
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    return SdkServer(clip5)
+
+
+def test_http_options_disable_the_sdk_retries_of_the_paid_post() -> None:
+    options = make_http_options(120.0)
+    assert options.timeout == 120_000
+    retry = options.retry_options
+    assert retry is not None
+    # attempts=0 ou 1 sozinhos ainda dão 2 POSTs; a lista [599] fecha as brechas (medido com o client real)
+    assert (retry.attempts, retry.http_status_codes) == (1, [599])
+
+
+CREATE_KWARGS: dict[str, Any] = {
+    "model": "gemini-omni-1.1-flash",
+    "input": "x",
+    "store": False,
+    "background": False,
+    "stream": False,
+    "automatic_continuation": False,
+    "timeout": 5,
+}
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 408, 429, 500, 502, 503, 504, "connect", "connect_timeout", "read"])
+def test_real_sdk_sends_exactly_one_post_per_create_with_our_http_options(
+    server: SdkServer, status: int | str
+) -> None:
+    """O SDK reenviava o POST sozinho (4 POSTs em 408/429/5xx). Com ``make_http_options`` é 1, medido aqui."""
+    server.create_script = [status] * 5
+    with pytest.raises(Exception):  # noqa: B017 - a classe exata é conferida nos testes de classificação
+        server.client().interactions.create(**CREATE_KWARGS)
+    assert server.posts == 1
+
+
+def test_sdk_default_options_would_resend_the_paid_post(server: SdkServer) -> None:
+    """Guarda do defeito: com as opções padrão do SDK instalado, um 408/429/5xx vira VÁRIOS POSTs."""
+    server.create_script = [504] * 10
+    http = httpx.Client(transport=httpx.MockTransport(server.handler))
+    default = server.client(options=genai_types.HttpOptions(httpx_client=http))
+    with pytest.raises(Exception):  # noqa: B017
+        default.interactions.create(**CREATE_KWARGS)
+    assert server.posts > 1
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
+def test_real_sdk_create_rejected_with_4xx_is_pre_accept_and_not_retried(
+    env: Env, server: SdkServer, status: int
+) -> None:
+    server.create_script = [status] * 3
+    exc, token = env.fail(client=server.client())
+    assert (exc.transient, exc.billed_units, exc.provider_job_id) == (True, 0.0, None)
+    assert env.job_id_in_ledger(token) is None
+    assert server.posts == 1
+    assert env.sleeps == [2.0]  # só a espera do arquivo de entrada (PROCESSING -> ACTIVE); nenhum backoff
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_real_sdk_create_429_503_is_retried_by_us_then_succeeds(env: Env, server: SdkServer, status: int) -> None:
+    server.create_script = [status, 200]
+    result, token = env.run(client=server.client())
+    assert server.posts == 2
+    assert server.upload_starts == 1  # a foto não é reenviada
+    assert result.provider_job_id == JOB_ID == env.job_id_in_ledger(token)
+    assert len(env.sleeps) == 2  # espera do arquivo de entrada + 1 backoff do nosso retry
+
+
+@pytest.mark.parametrize("status", [429, 503, "connect", "connect_timeout"])
+def test_real_sdk_create_refused_forever_is_transient_unbilled_after_bounded_retries(
+    env: Env, server: SdkServer, status: int | str
+) -> None:
+    server.create_script = [status] * 10
+    exc, token = env.fail(client=server.client())
+    assert (exc.transient, exc.billed_units, exc.provider_job_id) == (True, 0.0, None)
+    assert env.job_id_in_ledger(token) is None
+    assert server.posts == 3  # o limite de retry_before_accept; o SDK contribui com 1 por tentativa
+
+
+@pytest.mark.parametrize("status", [408, 500, 502, 504, "read"])
+def test_real_sdk_ambiguous_create_failure_is_billed_and_posted_exactly_once(
+    env: Env, server: SdkServer, status: int | str
+) -> None:
+    server.create_script = [status, 200]  # o 2º (sucesso) NÃO pode ser enviado
+    exc, token = env.fail(client=server.client())
+    assert (exc.transient, exc.billed_units, exc.provider_job_id) == (False, 5.0, None)
+    assert env.job_id_in_ledger(token) is None
+    assert server.posts == 1
+    assert env.sleeps == [2.0]  # só a espera do arquivo de entrada (PROCESSING -> ACTIVE); nenhum backoff
+
+
+def test_real_sdk_upload_rejected_with_403_is_pre_accept_and_not_retried(env: Env, server: SdkServer) -> None:
+    server.upload_script = [403] * 3
+    exc, _ = env.fail(client=server.client())
+    assert (exc.transient, exc.billed_units, exc.provider_job_id) == (True, 0.0, None)
+    assert server.upload_starts == 1 and server.posts == 0
+
+
+def test_real_sdk_upload_503_is_retried_and_never_reaches_create_until_it_works(env: Env, server: SdkServer) -> None:
+    server.upload_script = [503, 200]
+    result, _ = env.run(client=server.client())
+    assert server.upload_starts == 2 and server.posts == 1
+    assert result.provider_job_id == JOB_ID
+
+
+def test_real_sdk_adapter_built_client_posts_once_per_attempt(
+    env: Env, server: SdkServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pelo caminho preguiçoso do adaptador: as opções que ELE monta (não as do teste) valem 1 POST por tentativa."""
+    original = genai.Client
+
+    def factory(**kwargs: Any) -> genai.Client:
+        http = httpx.Client(transport=httpx.MockTransport(server.handler))
+        options = kwargs["http_options"].model_copy(update={"httpx_client": http})
+        return original(**{**kwargs, "http_options": options})
+
+    monkeypatch.setenv("GEMINI_API_KEY", "chave-ficticia-de-teste")
+    monkeypatch.setattr(genai, "Client", factory)
+    server.create_script = [504, 200]
+    gen = env.gen(client=None)
     token = reserve_for(env.conn, env.prices, gen, env.scene, env.run_id)
     req = SceneRequest(env.scene, env.run_id, token.attempt_no, env.out_dir / "s01.mp4")
-    result = gen.generate(req, token)
+    with pytest.raises(ProviderError):
+        gen.generate(req, token)
+    assert server.posts == 1
+
+
+def test_requires_continuation_is_a_post_accept_failure_and_is_never_continued(env: Env) -> None:
+    env.client.create_response = interaction(status="requires_continuation")
+    exc, token = env.fail()
+    assert_post_accept(exc, token, env)
+    assert "requires_continuation" in str(exc)
+    assert env.client.events.count("create") == 1  # nenhuma 2ª interação paga
+    assert env.client.create_kwargs[0]["automatic_continuation"] is False
+
+
+def test_real_sdk_accepts_the_calls_and_serializes_the_request_offline(env: Env, server: SdkServer) -> None:
+    """Prova de nomes e formatos contra o SDK instalado, sem rede: ``httpx.MockTransport`` no lugar do HTTP.
+
+    Confirma que ``files.upload/get/download`` e ``interactions.create`` existem com estes parâmetros e que o
+    corpo enviado ao provedor tem first-frame, prompt, duração, 1080p e entrega por URI.
+    """
+    result, _ = env.run(client=server.client())
 
     assert result.provider_job_id == JOB_ID
     assert result.units == pytest.approx(5.0, abs=0.1)
-    (post,) = bodies
-    body = json.loads(post)
+    assert server.posts == 1
+    body = json.loads(server.bodies[0])
     assert body["model"] == "gemini-omni-1.1-flash"
     assert body["response_format"] == {
         "type": "video",
@@ -1020,6 +1213,7 @@ def test_real_sdk_accepts_the_calls_and_serializes_the_request_offline(
         "delivery": "uri",
     }
     assert (body["background"], body["store"], body["stream"]) == (False, False, False)
+    assert "automatic_continuation" not in body  # opção do SDK, não do corpo
     parts = body["input"][0]["content"]
     assert parts[0] == {"type": "image", "uri": IN_URI, "mime_type": "image/jpeg"}
     assert parts[1]["type"] == "text" and parts[1]["text"].startswith("<FIRST_FRAME> ")

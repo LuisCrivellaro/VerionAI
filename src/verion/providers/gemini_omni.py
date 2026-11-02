@@ -3,7 +3,7 @@
 Fluxo de ``generate`` (cada passo depois do ``token.consume``, a primeira instrução):
 
 1. valida a cena (duração inteira de 3 a 10 s, foto existente em jpg/png/webp);
-2. cria o client do SDK de forma preguiçosa (a chave ``GEMINI_API_KEY`` é lida pelo próprio SDK);
+2. cria o client do SDK de forma preguiçosa (chave de ``GEMINI_API_KEY``, sem reenvio automático do SDK);
 3. ANTES do aceite (nada faturado): ``files.upload`` da foto e espera pelo estado ``ACTIVE``;
 4. ``interactions.create`` com first-frame + prompt + ``duration`` + 1080p + entrega por URI (síncrono);
 5. ``token.job_accepted(<id>)`` logo que o pedido volta, antes de qualquer outra coisa;
@@ -16,18 +16,33 @@ Regras de dinheiro (decisão do supervisor, evidência 09 e revisão da T2):
   provider_job_id=None)``. O submit e o upload repetem com backoff só nesse trecho (``retry_before_accept``);
 - falha DEPOIS do aceite: ``ProviderError(transient=False, billed_units=<segundos pedidos>,
   provider_job_id=<id>)``. Nunca se reenvia o pedido pago (o download, que é grátis, repete);
-- resposta AMBÍGUA do ``create`` (timeout, reset de conexão, HTTP 5xx fora o 503, qualquer exceção
-  desconhecida): o servidor pode ter gerado e faturado sem devolver o id. Trata-se como faturado, sem
-  reenvio: ``ProviderError(transient=False, billed_units=<segundos pedidos>, provider_job_id=None)``.
-  Só 429/503, recusas 4xx e falhas de conexão anteriores ao envio (recusada, DNS, ``httpx.ConnectError``)
-  contam como "antes do aceite".
+- resposta AMBÍGUA do ``create`` (timeout de leitura, reset de conexão, HTTP 408 e 5xx fora o 503,
+  qualquer exceção desconhecida): o servidor pode ter gerado e faturado sem devolver o id. Trata-se como
+  faturado, sem reenvio: ``ProviderError(transient=False, billed_units=<segundos pedidos>,
+  provider_job_id=None)``. Só 429/503, recusas 4xx (validação, autenticação) e falhas de conexão
+  anteriores ao envio (recusada, DNS, ``httpx.ConnectError``/``ConnectTimeout`` como causa) contam como
+  "antes do aceite";
+- O SDK NÃO pode reenviar o POST pago: com as opções padrão, ``interactions.create`` repete sozinho
+  (``RetryConfig(max_retries=4)`` em ``_gaos``) em 408/409/429/5xx, medido em 4 POSTs. O client que o
+  adaptador cria usa ``make_http_options`` (``HttpRetryOptions(attempts=1, http_status_codes=[599])``: 1 POST
+  em 408/429/5xx; ``attempts=0`` ou ``1`` sozinhos ainda davam 2). **Um client INJETADO (``client=...``)
+  tem de ser criado com as mesmas opções**, senão o dinheiro fica desprotegido;
+- ``automatic_continuation=False`` em toda chamada (o padrão ``True`` poderia gerar interactions pagas
+  extras) e ``requires_continuation`` é tratado como falha pós-aceite, nunca continuado.
 
 Duração: o modelo aceita segundos INTEIROS de 3 a 10. ``Scene.duration_s`` é arredondado para o inteiro
 mais próximo (meio sobe: 4,5 -> 5) e o resultado precisa cair em 3..10, senão ``InputError``
 (2,49 e 10,5 já falham). ``estimate`` e ``generate`` usam a mesma regra.
 
-``units`` = segundos do arquivo baixado (ffprobe). O Omni devolve tokens de saída, não segundos faturados,
-então ``cost_is_estimate=True`` (o preço em ``config/prices.toml`` também é HIPÓTESE).
+``units`` = ``max(segundos medidos no arquivo baixado (ffprobe), segundos pedidos)``: o provedor pode
+faturar o pedido mesmo entregando menos, então nunca se registra menos que o pedido. Os segundos medidos vão
+em ``meta["measured_s"]`` e, se passarem do pedido em mais de 1 s, ``meta["over_requested"] = "true"``. O Omni
+devolve tokens de saída, não segundos faturados, então ``cost_is_estimate=True`` (o preço em
+``config/prices.toml`` também é HIPÓTESE).
+
+Cliente real: ``genai.Client(vertexai=False, api_key=os.environ["GEMINI_API_KEY"], http_options=...)``, criado
+só depois de ``token.consume``. Sem a variável: ``ConfigError``. ``GOOGLE_API_KEY`` e
+``GOOGLE_GENAI_USE_VERTEXAI`` do ambiente são ignoradas de propósito.
 
 Confirmado OFFLINE contra o SDK instalado (``google-genai`` 2.34.0, ver ``tests/providers/test_gemini_omni.py``,
 onde o ``genai.Client`` REAL roda sobre um ``httpx.MockTransport``):
@@ -37,9 +52,13 @@ onde o ``genai.Client`` REAL roda sobre um ``httpx.MockTransport``):
 - ``client.files.download(file=<uri>, destination=<caminho>)`` grava em disco (e devolve ``None``);
 - ``client.interactions.create(model=, input=[{"type": "image", "uri", "mime_type"}, {"type": "text", ...}],
   response_format={"type": "video", "aspect_ratio", "resolution", "duration": "5s", "delivery": "uri"},
-  background=, store=, stream=, timeout=<segundos>)`` serializa o corpo esperado; ``Interaction`` tem
-  ``id``, ``status`` ("completed", "failed", ...), ``output_video.uri``, ``usage.total_output_tokens``,
-  ``errors``; ``APIError.code`` (``ClientError`` 4xx, ``ServerError`` 5xx).
+  background=, store=, stream=, timeout=<segundos>, automatic_continuation=)`` serializa o corpo esperado;
+  ``Interaction`` tem ``id``, ``status`` ("completed", "failed", "requires_continuation", ...),
+  ``output_video.uri``, ``usage.total_output_tokens``, ``errors``;
+- os erros de ``interactions.create`` vêm de ``google.genai._gaos.lib.compat_errors`` (``APIStatusError``
+  com ``.status_code``, ``APIConnectionError``, ``APITimeoutError`` com a exceção do httpx em ``__cause__``),
+  que NÃO herdam de ``genai_errors.APIError`` (esse é o dos ``files.*``, com ``.code``). Por isso a
+  classificação é por duck typing (``status_code`` ou ``code``) e pela cadeia ``__cause__``.
 
 Confirmado na documentação oficial (``ai.google.dev/gemini-api/docs/omni``): chamada síncrona com
 ``background=false, store=false, stream=false``; first-frame pela tag ``<FIRST_FRAME>`` no texto; resolução
@@ -105,6 +124,7 @@ _MIME_BY_SUFFIX: Final = {
 }
 
 _DEFAULT_DEADLINE_S: Final = 900.0  # prazo total de um generate (relógio injetável)
+_OVER_REQUESTED_TOLERANCE_S: Final = 1.001  # acima disso, o clipe é sinalizado em meta
 _POLL_FIRST_S: Final = 2.0
 _POLL_FACTOR: Final = 1.5
 _POLL_MAX_S: Final = 10.0
@@ -112,6 +132,8 @@ _POLL_TOLERATED_ERRORS: Final = 2  # erros seguidos tolerados em files.get antes
 _DOWNLOAD_ATTEMPTS: Final = 3
 _DOWNLOAD_BACKOFF_S: Final = 2.0
 _RETRYABLE_CODES: Final = frozenset({429, 503})  # recusa do provedor, sem job criado
+# Falhas de stdlib/httpx com prova de que o pedido não saiu (como em providers/base.py).
+_BEFORE_SEND: Final = (ConnectionRefusedError, socket.gaierror, httpx.ConnectError, httpx.ConnectTimeout)
 
 _PROMPT_SUFFIX: Final = (
     "Single continuous shot, no scene cuts. Keep the room, furniture, decor and architecture exactly as in "
@@ -153,12 +175,46 @@ class _Uploaded:
     mime_type: str
 
 
+def make_http_options(
+    deadline_s: float, *, httpx_client: httpx.Client | None = None
+) -> genai_types.HttpOptions:
+    """Opções HTTP do client do Omni: timeout total e SEM reenvio automático do SDK (ver o docstring do módulo).
+
+    ``httpx_client`` existe para os testes trocarem a rede por um ``httpx.MockTransport``.
+    """
+    return genai_types.HttpOptions(
+        timeout=int(deadline_s * 1000),
+        retry_options=genai_types.HttpRetryOptions(attempts=1, http_status_codes=[599]),
+        httpx_client=httpx_client,
+    )
+
+
+def _status_of(exc: BaseException) -> int | None:
+    """Status HTTP da exceção por duck typing: ``status_code`` (``_gaos``) ou ``code`` (``genai.errors``)."""
+    for attr in ("status_code", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _failed_before_send(exc: BaseException) -> bool:
+    """Conexão que comprovadamente falhou antes de enviar o pedido (a causa pode estar encadeada pelo SDK)."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, _BEFORE_SEND):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
+
+
 def _describe(exc: BaseException) -> str:
     """Texto curto e sem segredos de uma exceção, para mensagens de erro e ledger."""
-    if isinstance(exc, genai_errors.APIError):
-        text = f"HTTP {exc.code} {exc.status or ''}: {exc.message or ''}"
-    else:
-        text = f"{type(exc).__name__}: {exc}"
+    status = _status_of(exc)
+    message = getattr(exc, "message", None) or str(exc)
+    text = f"HTTP {status}: {message}" if status is not None else f"{type(exc).__name__}: {message}"
     text = _SECRET_RE.sub("[REDACTED_KEY]", text)
     text = _BEARER_RE.sub("Bearer [REDACTED_TOKEN]", text)
     text = _QUERY_SECRET_RE.sub(r"\1[REDACTED]", text)
@@ -166,10 +222,10 @@ def _describe(exc: BaseException) -> str:
     return text if len(text) <= 300 else text[:297] + "..."
 
 
-def _is_client_rejection(exc: genai_errors.APIError) -> bool:
+def _is_client_rejection(exc: BaseException) -> bool:
     """4xx que o provedor devolveu por recusar o pedido (chave, política, formato); 408 e 429 ficam de fora."""
-    code = exc.code
-    return isinstance(code, int) and 400 <= code < 500 and code not in (408, 429)
+    status = _status_of(exc)
+    return status is not None and 400 <= status < 500 and status not in (408, 429)
 
 
 def _file_id(uri: str | None) -> str | None:
@@ -263,15 +319,12 @@ class GeminiOmniAdapter:
 
     def _ensure_client(self) -> Any:
         if self._client is None:
-            try:
-                self._client = genai.Client(
-                    http_options=genai_types.HttpOptions(timeout=int(self._deadline_s * 1000))
-                )
-            except ValueError as exc:  # o SDK não achou a chave
-                raise ConfigError(
-                    "chave da Gemini API ausente: defina GEMINI_API_KEY no ambiente "
-                    f"({_describe(exc)})"
-                ) from exc
+            api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+            if not api_key:
+                raise ConfigError("chave da Gemini API ausente: defina GEMINI_API_KEY no ambiente")
+            self._client = genai.Client(
+                vertexai=False, api_key=api_key, http_options=make_http_options(self._deadline_s)
+            )
         return self._client
 
     # --- antes do aceite --------------------------------------------------------------------
@@ -335,6 +388,7 @@ class GeminiOmniAdapter:
             "background": False,
             "store": False,
             "stream": False,
+            "automatic_continuation": False,  # opção do SDK: sem interactions pagas extras
         }
 
         def attempt() -> Any:
@@ -343,24 +397,20 @@ class GeminiOmniAdapter:
                 raise _Rejected("prazo esgotado antes de submeter o pedido ao provedor")
             try:
                 return client.interactions.create(**kwargs, timeout=remaining)
-            except genai_errors.APIError as exc:
-                if exc.code in _RETRYABLE_CODES:
-                    raise ProviderError(
-                        f"provedor recusou o pedido: {_describe(exc)}", transient=True
-                    ) from exc
-                if _is_client_rejection(exc):
-                    raise _Rejected(f"provedor recusou o pedido: {_describe(exc)}") from exc
-                raise _Ambiguous(exc) from exc
-            except (
-                ConnectionRefusedError,
-                socket.gaierror,
-                httpx.ConnectError,
-                httpx.ConnectTimeout,
-            ) as exc:  # falhas comprovadamente anteriores ao envio
-                raise ProviderError(
-                    f"sem conexão com o provedor: {_describe(exc)}", transient=True
-                ) from exc
             except Exception as exc:
+                status = _status_of(exc)
+                if status is not None:
+                    if status in _RETRYABLE_CODES:
+                        raise ProviderError(
+                            f"provedor recusou o pedido: {_describe(exc)}", transient=True
+                        ) from exc
+                    if _is_client_rejection(exc):
+                        raise _Rejected(f"provedor recusou o pedido: {_describe(exc)}") from exc
+                    raise _Ambiguous(exc) from exc
+                if _failed_before_send(exc):
+                    raise ProviderError(
+                        f"sem conexão com o provedor: {_describe(exc)}", transient=True
+                    ) from exc
                 raise _Ambiguous(exc) from exc
 
         try:
@@ -429,7 +479,10 @@ class GeminiOmniAdapter:
             "aspect_ratio": ASPECT_RATIO,
             "duration_requested_s": str(seconds),
             "delivered": f"{probe.width}x{probe.height}",
+            "measured_s": f"{probe.duration_s:.3f}",
         }
+        if probe.duration_s > seconds + _OVER_REQUESTED_TOLERANCE_S:
+            meta["over_requested"] = "true"
         if getattr(interaction, "id", None):
             meta["interaction_id"] = str(interaction.id)
         if file_id is not None:
@@ -443,7 +496,7 @@ class GeminiOmniAdapter:
             width=probe.width,
             height=probe.height,
             fps=probe.fps_value,
-            units=round(probe.duration_s, 3),
+            units=max(round(probe.duration_s, 3), float(seconds)),
             unit_kind=self._prices.unit_kind_of(self.method),
             cost_is_estimate=True,
             provider_job_id=job_id,

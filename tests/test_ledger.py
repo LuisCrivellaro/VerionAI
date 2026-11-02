@@ -292,6 +292,64 @@ def test_db_refuses_error_below_reserve_and_editing_settled_rows(conn: sqlite3.C
         conn.execute("DELETE FROM attempts WHERE id=?", (attempt_id,))
 
 
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("reserved_brl", 0.0),
+        ("method", "ken-burns"),
+        ("run_id", 2),
+        ("scene_index", 2),
+        ("attempt_no", 2),
+    ],
+)
+def test_db_refuses_editing_reservation_identity_of_a_pending_row(
+    conn: sqlite3.Connection, column: str, value: object
+) -> None:
+    """Achado 1: a reserva (e a identidade da linha) não muda nem enquanto está pending."""
+    first = make_run(conn)
+    make_run(conn)  # o run 2 existe: o FK não pode ser a causa da recusa de run_id=2
+    attempt_id = add_pending(conn, first, reserved=5.0)
+    sql = f"UPDATE attempts SET {column} = ? WHERE id = ?"
+    if column == "reserved_brl":
+        sql = "UPDATE attempts SET reserved_brl = ?, cost_brl = ? WHERE id = ?"
+        params: tuple[object, ...] = (value, value, attempt_id)
+    else:
+        params = (value, attempt_id)
+    with pytest.raises(sqlite3.IntegrityError, match="reserva e identidade"):
+        conn.execute(sql, params)
+    row = repo.get_attempt(conn, attempt_id)
+    assert row is not None
+    assert (row.run_id, row.scene_index, row.attempt_no, row.method) == (1, 1, 1, "fake")
+    assert row.reserved_brl == 5.0 and row.cost_brl == 5.0
+    assert repo.spent_brl(conn) == 5.0
+
+
+def test_pending_row_can_still_be_settled_after_the_identity_trigger(conn: sqlite3.Connection) -> None:
+    attempt_id = add_pending(conn, make_run(conn), reserved=5.0)
+    repo.set_job_id(conn, attempt_id, "job-9")
+    assert finish_error(conn, attempt_id, cost=7.0).cost_brl == 7.0
+
+
+def test_transaction_rolls_back_when_commit_fails(conn: sqlite3.Connection) -> None:
+    """Achado 6: um COMMIT que falha (FK adiado) não pode deixar a transação aberta nem dados gravados."""
+    with pytest.raises(sqlite3.IntegrityError), repo.transaction(conn):
+        conn.execute("PRAGMA defer_foreign_keys = ON")  # a violação só aparece no COMMIT
+        add_pending(conn, 999)  # run inexistente
+    assert not conn.in_transaction
+    assert repo.list_attempts(conn) == []
+    with repo.transaction(conn):  # a conexão segue utilizável
+        run_id = make_run(conn)
+    assert repo.get_run(conn, run_id).id == run_id
+
+
+def test_transaction_rolls_back_on_keyboard_interrupt(conn: sqlite3.Connection) -> None:
+    with pytest.raises(KeyboardInterrupt), repo.transaction(conn):
+        make_run(conn)
+        raise KeyboardInterrupt
+    assert not conn.in_transaction
+    assert repo.list_runs(conn) == []
+
+
 # --- autorizações e gasto ---------------------------------------------------------------------
 
 

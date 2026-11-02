@@ -11,7 +11,8 @@ e reservas via ``repo``). Regras:
    recebe ``token`` e começa com ``token.consume(self.method)``. O Protocol de ``providers/base.py``
    é isento. A classe precisa definir ``generate`` no próprio corpo com ``def``, sem decoradores
    (herdado, atribuído ou decorado falha).
-5. SQL de escrita (``INSERT INTO authorizations|attempts``, ``UPDATE attempts``) só em ``ledger/repo.py``.
+5. SQL de escrita em ``authorizations``/``attempts`` (``INSERT [OR ...] INTO``, ``REPLACE INTO``,
+   ``UPDATE [OR ...]``, ``DELETE FROM``) só em ``ledger/repo.py``.
 
 As regras são funções puras sobre ``{caminho_relativo: fonte}``; os testes negativos alimentam fontes
 sintéticas para provar que cada regra detecta violações (os diretórios providers/ e local/ ainda não
@@ -98,8 +99,11 @@ def check_add_authorization(sources: Mapping[str, str]) -> list[str]:
 
 
 RAW_SQL_ALLOWED = frozenset({"ledger/repo.py"})
+_OR_CLAUSE = r"(?:or\s+\w+\s+)?"  # INSERT OR REPLACE / UPDATE OR IGNORE...
 _RAW_LEDGER_WRITE = re.compile(
-    r"\b(insert\s+into\s+(authorizations|attempts)|update\s+attempts)\b", re.IGNORECASE
+    rf"\b(?:insert\s+{_OR_CLAUSE}into\s+|replace\s+into\s+|update\s+{_OR_CLAUSE}|delete\s+from\s+)"
+    r"(?:authorizations|attempts)\b",
+    re.IGNORECASE,
 )
 
 
@@ -348,10 +352,16 @@ def test_violations_in_multiple_classes_are_all_reported() -> None:
     assert len(check_adapters({"providers/x.py": bad})) == 2
 
 
-def test_tests_directory_is_out_of_scope() -> None:
-    """Rótulo de escopo: a varredura parte de src/verion e não enxerga tests/."""
-    assert SRC_ROOT.name == "verion" and SRC_ROOT.parent.name == "src"
-    assert "tests" not in {p.name for p in SRC_ROOT.iterdir() if p.is_dir()}
+def test_scan_scope_is_exactly_src_verion(real_sources: dict[str, str]) -> None:
+    """A varredura cobre todo ``.py`` de src/verion e exclui tests/ de propósito (achado 7)."""
+    on_disk = {p.relative_to(SRC_ROOT).as_posix() for p in SRC_ROOT.rglob("*.py")}
+    assert set(real_sources) == on_disk
+    tests_dir = Path(__file__).resolve().parent
+    assert tests_dir.name == "tests" and tests_dir.parent == SRC_ROOT.parents[1]
+    # A exclusão importa: se tests/ entrasse no escopo, as regras 2 e 5 acusariam violações
+    # (os testes semeiam reservas via repo.insert_pending e SQL bruto de propósito).
+    in_tests = load_sources(tests_dir)
+    assert check_insert_pending(in_tests)
 
 
 # --- revisão T1 rodada 1 -------------------------------------------------------------------------
@@ -372,11 +382,14 @@ def test_issued_registry_and_used_flag_are_restricted_to_budget() -> None:
     for src in (
         "from verion.budget import _ISSUED\n",
         "from verion import budget\nbudget._ISSUED.add(t)\n",
+        "from verion import budget\nbudget._ISSUED[t] = g\n",
+        "object.__setattr__(token, '_used', False)\n",
+        "vars(token)['_used'] = False\n",
         "token._used = False\n",
         "setattr(token, '_used', False)\n",
     ):
         assert check_seal({"harness.py": src}), src
-    assert check_seal({"budget.py": "_ISSUED = set()\nself._used = True\n"}) == []
+    assert check_seal({"budget.py": "_ISSUED = {}\nself._used = True\n"}) == []
     assert check_seal({"harness.py": "if token._used:\n    pass\n"}) == []  # leitura não é escrita
 
 
@@ -385,6 +398,13 @@ def test_raw_ledger_writes_are_restricted_to_repo() -> None:
         "INSERT INTO authorizations (amount_brl) VALUES (1)",
         "insert   into\n attempts (id) values (1)",
         "Update Attempts SET cost_brl = 0",
+        "INSERT OR REPLACE INTO authorizations (id, amount_brl) VALUES (1, 1)",
+        "insert or ignore into attempts (id) values (1)",
+        "REPLACE INTO authorizations (id) VALUES (1)",
+        "UPDATE OR FAIL attempts SET cost_brl = 0",
+        "UPDATE authorizations SET amount_brl = 1e9",
+        "DELETE FROM authorizations",
+        "delete   from attempts",
     ):
         src = f"conn.execute({sql!r})\n"
         assert check_raw_ledger_sql({"harness.py": src}), sql
@@ -393,7 +413,8 @@ def test_raw_ledger_writes_are_restricted_to_repo() -> None:
     fstring = "conn.execute(f'UPDATE attempts SET cost_brl = {x}')\n"
     assert check_raw_ledger_sql({"report.py": fstring})
     assert check_raw_ledger_sql({"report.py": "conn.execute('SELECT * FROM attempts')\n"}) == []
-    assert check_raw_ledger_sql({"report.py": "conn.execute('INSERT INTO runs VALUES (1)')\n"}) == []
+    for harmless in ("INSERT INTO runs VALUES (1)", "UPDATE runs SET notes = 'x'", "DELETE FROM qc_reviews"):
+        assert check_raw_ledger_sql({"report.py": f"conn.execute({harmless!r})\n"}) == [], harmless
 
 
 def test_real_tree_has_no_raw_ledger_writes_outside_repo(real_sources: dict[str, str]) -> None:

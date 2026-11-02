@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import sqlite3
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -27,8 +28,23 @@ from verion.ledger.repo import AttemptRow
 # Selo privado: só ``reserve`` o repassa ao construtor. O teste AST proíbe o nome fora deste módulo.
 _SEAL: Final = object()
 
-# Tokens emitidos por ``reserve`` neste processo. Cópias (copy, __new__ + __dict__) não entram aqui.
-_ISSUED: weakref.WeakSet[SpendToken] = weakref.WeakSet()
+
+
+@dataclass(frozen=True, slots=True)
+class _Grant:
+    """Instantâneo imutável do que ``reserve`` emitiu. Vive fora do token, então não é adulterável por ele."""
+
+    conn: sqlite3.Connection
+    prices: PriceTable
+    attempt_id: int
+    attempt_no: int
+    method: str
+    reserved_brl: float
+
+
+# Tokens emitidos por ``reserve`` neste processo, com o instantâneo do que foi emitido. Cópias
+# (copy, __new__ + __dict__) não entram aqui; atributos alterados via ``vars()`` divergem do instantâneo.
+_ISSUED: weakref.WeakKeyDictionary[SpendToken, _Grant] = weakref.WeakKeyDictionary()
 
 _BALANCE_EPS: Final = 1e-9  # tolerância de ponto flutuante na comparação de saldo
 _MIN_COST_BRL: Final = 1e-6  # custo de método pago abaixo disso é tratado como zero
@@ -39,10 +55,21 @@ class SpendToken:
     """Autorização de uso único para UMA chamada de ``generate``. Só ``reserve`` cria (exige ``_SEAL``).
 
     Exceção declarada à regra ``frozen``: só ``_used`` muda depois da criação (``_conn`` é fixo). Os
-    campos públicos são somente leitura e, a cada uso, conferidos contra a linha ``pending`` no banco.
+    campos públicos são somente leitura. A cada uso, ``_require_issued`` compara todos os atributos com o
+    instantâneo de ``_ISSUED`` (adulteração via ``vars()`` → ``TokenInvalid``) e ``_require_pending``
+    confere método, tentativa e reserva contra a linha ``pending`` do ledger.
     """
 
     _MUTABLE: Final = frozenset({"_used"})
+
+    # Declarações para o type checker: os valores são gravados com object.__setattr__ em __init__.
+    _conn: sqlite3.Connection
+    _prices: PriceTable
+    _used: bool
+    _attempt_id: int
+    _attempt_no: int
+    _method: str
+    _reserved_brl: float
 
     def __init__(
         self,
@@ -65,7 +92,7 @@ class SpendToken:
         init(self, "_attempt_no", attempt_no)
         init(self, "_method", method)
         init(self, "_reserved_brl", reserved_brl)
-        _ISSUED.add(self)
+        _ISSUED[self] = _Grant(conn, prices, attempt_id, attempt_no, method, reserved_brl)
 
     def __setattr__(self, name: str, value: object) -> None:
         if name not in self._MUTABLE:
@@ -92,9 +119,26 @@ class SpendToken:
         return self._reserved_brl
 
     def _require_issued(self) -> None:
-        # ``in`` usa hash por identidade; ``__new__`` sem init e cópias não estão em _ISSUED.
-        if self not in _ISSUED:
+        # Hash por identidade: ``__new__`` sem init e cópias não estão em _ISSUED.
+        grant = _ISSUED.get(self)
+        if grant is None:
             raise TokenInvalid("SpendToken não foi emitido por budget.reserve")
+        try:
+            current: tuple[object, ...] = (
+                self._conn,
+                self._prices,
+                self._attempt_id,
+                self._attempt_no,
+                self._method,
+                self._reserved_brl,
+            )
+        except AttributeError:  # atributo apagado via vars()
+            current = ()
+        issued = (grant.conn, grant.prices, grant.attempt_id, grant.attempt_no, grant.method, grant.reserved_brl)
+        if len(current) != len(issued) or any(
+            a is not b and a != b for a, b in zip(current, issued, strict=True)
+        ):
+            raise TokenInvalid("SpendToken adulterado: campos diferentes dos emitidos por budget.reserve")
 
     def _require_conn(self, conn: sqlite3.Connection) -> None:
         if conn is not self._conn:

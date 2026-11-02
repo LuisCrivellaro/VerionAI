@@ -340,7 +340,8 @@ def get_attempt(conn: sqlite3.Connection, attempt_id: int) -> AttemptRow | None:
 def list_attempts(
     conn: sqlite3.Connection, *, run_id: int | None = None, method: str | None = None
 ) -> list[AttemptRow]:
-    clauses, params = [], []
+    clauses: list[str] = []
+    params: list[int | str] = []
     if run_id is not None:
         clauses.append("run_id = ?")
         params.append(run_id)

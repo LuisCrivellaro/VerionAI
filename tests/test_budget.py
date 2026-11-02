@@ -56,8 +56,16 @@ def reserve(
 
 
 def settle_ok(
-    conn: sqlite3.Connection, token: SpendToken, *, units: float = 2.0, job: str | None = None
+    conn: sqlite3.Connection,
+    token: SpendToken,
+    *,
+    units: float = 2.0,
+    job: str | None = None,
+    consume: bool = True,
 ) -> repo.AttemptRow:
+    """Simula o fluxo real: ``generate`` consome o token e só então o harness liquida (achado 2)."""
+    if consume:
+        token.consume(token.method)
     return budget.settle_ok(
         conn,
         token,
@@ -375,11 +383,13 @@ def test_settle_ok_with_invalid_units_leaves_row_pending(
 ) -> None:
     authorize(100.0)
     token = reserve(conn, prices, make_run(conn), units=5.0)
+    token.consume("fake")
     for units in (0.0, -1.0, math.nan):
         with pytest.raises(errors.EstimateInvalid):
-            settle_ok(conn, token, units=units)
+            settle_ok(conn, token, units=units, consume=False)
     assert repo.get_attempt(conn, token.attempt_id).status == "pending"  # type: ignore[union-attr]
     assert repo.spent_brl(conn) == pytest.approx(5.0)  # a reserva continua valendo
+    assert settle_ok(conn, token, units=5.0, consume=False).status == "ok"  # e ainda dá para liquidar
 
 
 def test_cannot_settle_twice(conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize) -> None:
@@ -388,10 +398,11 @@ def test_cannot_settle_twice(conn: sqlite3.Connection, prices: PriceTable, autho
     ok_token = reserve(conn, prices, run_id, scene=1, units=2.0)
     settle_ok(conn, ok_token)
     err_token = reserve(conn, prices, run_id, scene=2, units=2.0)
+    err_token.consume("fake")
     settle_error(conn, err_token)
-    for token in (ok_token, err_token):
-        with pytest.raises(errors.TokenInvalid):
-            settle_ok(conn, token)
+    for token in (ok_token, err_token):  # ambos já consumidos: a recusa vem da linha não-pending
+        with pytest.raises(errors.TokenInvalid, match="pending"):
+            settle_ok(conn, token, consume=False)
         with pytest.raises(errors.TokenInvalid):
             settle_error(conn, token)
     assert repo.spent_brl(conn) == pytest.approx(4.0)
@@ -460,7 +471,7 @@ def test_job_accepted_requires_consume_and_persists_job_id(
     token.job_accepted("job-1")
     row = repo.get_attempt(conn, token.attempt_id)
     assert row is not None and row.provider_job_id == "job-1" and row.status == "pending"
-    assert settle_ok(conn, token).provider_job_id == "job-1"
+    assert settle_ok(conn, token, consume=False).provider_job_id == "job-1"
 
 
 def test_token_exposes_reservation_details(conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize) -> None:
@@ -508,9 +519,231 @@ def test_ok_without_qc_blocks_next_reserve_until_verdict(
 def test_attempt_rule_errors_are_not_spend_blocked(conn: sqlite3.Connection, prices: PriceTable) -> None:
     """Free method: AttemptRuleError sobe sem criar linha (o harness põe a cena em `skipped`)."""
     run_id = make_run(conn, "ken-burns")
-    kwargs = dict(method="ken-burns", units=0.0, unit_kind="none", allow_paid=False)
+    kwargs = {"method": "ken-burns", "units": 0.0, "unit_kind": "none", "allow_paid": False}
     token = reserve(conn, prices, run_id, **kwargs)  # type: ignore[arg-type]
     settle_ok(conn, token, units=0.0)
     with pytest.raises(errors.AwaitingQC):
         reserve(conn, prices, run_id, **kwargs)  # type: ignore[arg-type]
     assert len(repo.list_attempts(conn)) == 1
+
+
+# --- revisão T1 rodada 1 ----------------------------------------------------------------------
+
+from decimal import Decimal
+
+import numpy as np
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("method", "ken-burns"), ("attempt_id", 999), ("attempt_no", 3), ("reserved_brl", 0.0)],
+)
+def test_token_public_fields_are_read_only(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize, field: str, value: object
+) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn, "veo-3.1-fast"), method="veo-3.1-fast", units=32.0)
+    assert token.reserved_brl == pytest.approx(16.0)
+    with pytest.raises(AttributeError):
+        setattr(token, field, value)
+    assert getattr(token, field) != value
+    assert repo.spent_brl(conn) == pytest.approx(16.0)
+
+
+def test_token_tampered_via_dict_is_refused_and_cost_never_drops(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize
+) -> None:
+    """Reprodução da revisão: reserva veo de R$ 16, troca o método para grátis e liquida com 0."""
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn, "veo-3.1-fast"), method="veo-3.1-fast", units=32.0)
+    private = {k: v for k, v in vars(token).items() if v == "veo-3.1-fast"}
+    assert private, "o token deve guardar o método em algum atributo"
+    for key in private:
+        vars(token)[key] = "ken-burns"
+    with pytest.raises(errors.TokenInvalid, match="adulterado"):
+        token.consume("ken-burns")
+    with pytest.raises(errors.TokenInvalid, match="adulterado"):
+        settle_ok(conn, token, units=0.0, consume=False)
+    with pytest.raises(errors.TokenInvalid, match="adulterado"):
+        settle_error(conn, token)
+    assert repo.spent_brl(conn) == pytest.approx(16.0)
+
+
+@pytest.mark.parametrize("field_value", [("attempt_no", 2), ("reserved_brl", 0.5), ("attempt_id", 2)])
+def test_token_tampered_numeric_fields_are_refused(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize, field_value: tuple[str, object]
+) -> None:
+    authorize(100.0)
+    run_id = make_run(conn)
+    token = reserve(conn, prices, run_id, scene=1, units=2.0)
+    reserve(conn, prices, run_id, scene=2, units=2.0)  # attempt_id 2 existe, pending, outra cena
+    field, value = field_value
+    keys = [k for k, v in vars(token).items() if k.endswith(field) and k != field]
+    assert keys
+    for key in keys:
+        vars(token)[key] = value
+    with pytest.raises(errors.TokenInvalid, match="adulterado"):
+        token.consume("fake")
+    assert repo.spent_brl(conn) == pytest.approx(4.0)
+
+
+def test_settle_ok_requires_consumed_token(conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn), units=2.0)
+    with pytest.raises(errors.TokenInvalid, match="consumido"):
+        settle_ok(conn, token, consume=False)
+    assert repo.get_attempt(conn, token.attempt_id).status == "pending"  # type: ignore[union-attr]
+    token.consume("fake")
+    assert settle_ok(conn, token, consume=False).status == "ok"
+
+
+@pytest.mark.parametrize("billed", [Decimal(5), np.int64(5), np.float32(5.0), 5])
+def test_settle_error_accepts_numeric_types(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize, billed: object
+) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn), units=1.0)  # reserva R$ 1
+    row = settle_error(conn, token, billed=billed)  # type: ignore[arg-type]
+    assert row.cost_brl == pytest.approx(5.0)
+    assert row.units == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("billed", [math.inf, -1.0, math.nan, "abc", None, Decimal("NaN")])
+def test_settle_error_invalid_billed_falls_back_to_reserve_and_is_logged(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize, billed: object
+) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn), units=1.0)
+    row = settle_error(conn, token, billed=billed)  # type: ignore[arg-type]
+    assert row.cost_brl == pytest.approx(1.0)
+    assert row.error is not None and "falhou" in row.error and repr(billed) in row.error
+
+
+def test_reserved_brl_cannot_be_updated_in_sql(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize
+) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn), units=2.0)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE attempts SET reserved_brl = 0, cost_brl = 0 WHERE id = ?", (token.attempt_id,))
+    row = repo.get_attempt(conn, token.attempt_id)
+    assert row is not None and row.reserved_brl == 2.0 and row.cost_brl == 2.0
+
+
+@pytest.mark.parametrize("scene", [True, 1.0, "1", None])
+def test_reserve_requires_int_scene_index(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize, scene: object
+) -> None:
+    authorize(100.0)
+    with pytest.raises(errors.InputError):
+        reserve(conn, prices, make_run(conn), scene=scene)  # type: ignore[arg-type]
+    assert repo.list_attempts(conn) == []
+
+
+def test_reserve_non_finite_cost_is_estimate_invalid(conn: sqlite3.Connection, authorize: Authorize) -> None:
+    authorize(1000.0)
+    table = PriceTable(5.0, {"fake": MethodPrice("video_seconds", 10.0, "BRL", "teste")})
+    with pytest.raises(errors.EstimateInvalid):
+        reserve(conn, table, make_run(conn), units=1e308)  # 1e308 * 10 = inf
+    assert repo.list_attempts(conn) == []
+
+
+def test_settle_with_another_connection_is_refused(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize, tmp_path: Path
+) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn), units=2.0)
+    token.consume("fake")
+    other = repo.connect(tmp_path / "verion.db")
+    try:
+        with pytest.raises(errors.TokenInvalid):
+            settle_ok(other, token)
+        with pytest.raises(errors.TokenInvalid):
+            settle_error(other, token)
+    finally:
+        other.close()
+    assert repo.get_attempt(conn, token.attempt_id).status == "pending"  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("field", ["_prices", "_conn"])
+def test_token_tampered_prices_or_connection_are_refused(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize, tmp_path: Path, field: str
+) -> None:
+    """Trocar a tabela de preços (ou a conexão) do token não pode baratear nem desviar a liquidação."""
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn, "veo-3.1-fast"), method="veo-3.1-fast", units=32.0)
+    cheap = PriceTable(5.0, {"veo-3.1-fast": MethodPrice("video_seconds", 1e-6, "USD", "adulterada")})
+    other = repo.connect(tmp_path / "outro.db")
+    try:
+        vars(token)[field] = cheap if field == "_prices" else other
+        for call in (
+            lambda: token.consume("veo-3.1-fast"),
+            lambda: settle_ok(conn, token, units=1.0, consume=False),
+            lambda: settle_error(conn, token),
+        ):
+            with pytest.raises(errors.TokenInvalid, match="adulterado"):
+                call()
+    finally:
+        other.close()
+    assert repo.get_attempt(conn, token.attempt_id).status == "pending"  # type: ignore[union-attr]
+    assert repo.spent_brl(conn) == pytest.approx(16.0)
+
+
+def test_token_cannot_be_deleted_attribute(conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn), units=2.0)
+    with pytest.raises(AttributeError):
+        del token._method  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        token.brand_new_attribute = 1  # type: ignore[attr-defined]
+
+
+# --- revisão T1 rodada 2: settle não confia em métodos/atributos do próprio token -----------------
+
+
+class _FreePrices:
+    """Tabela 'grátis' maliciosa: tudo custa zero e nada é pago."""
+
+    def cost_brl(self, method: str, units: float) -> float:
+        return 0.0
+
+    def is_paid(self, method: str) -> bool:
+        return False
+
+
+def test_subclass_token_with_noop_checks_cannot_settle_for_free(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize
+) -> None:
+    authorize(100.0)
+    real = reserve(conn, prices, make_run(conn), units=5.0)
+    real.consume("fake")
+
+    class Evil(SpendToken):
+        def _require_issued(self) -> None:  # anula a checagem
+            return None
+
+    evil = Evil.__new__(Evil)
+    for name in ("_conn", "_used", "_attempt_id", "_attempt_no", "_method", "_reserved_brl"):
+        object.__setattr__(evil, name, object.__getattribute__(real, name))
+    object.__setattr__(evil, "_prices", _FreePrices())
+    with pytest.raises(budget.TokenInvalid):
+        budget.settle_ok(
+            conn, evil, units=5.0, cost_is_estimate=False, clip_path=Path("c.mp4"),
+            duration_s=5.0, wall_time_s=1.0, provider_job_id=None,
+        )
+    with pytest.raises(budget.TokenInvalid):
+        budget.settle_error(conn, evil, billed_units=0.0, error="x", wall_time_s=1.0, provider_job_id=None)
+    assert repo.spent_brl(conn) == pytest.approx(5.0)  # a reserva continua contando
+
+
+def test_instance_level_method_override_does_not_bypass_settle(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize
+) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn), units=5.0)
+    token.consume("fake")
+    object.__setattr__(token, "_require_issued", lambda: None)
+    object.__setattr__(token, "_prices", _FreePrices())
+    with pytest.raises(budget.TokenInvalid):
+        settle_ok(conn, token, units=5.0, consume=False)
+    assert repo.spent_brl(conn) == pytest.approx(5.0)

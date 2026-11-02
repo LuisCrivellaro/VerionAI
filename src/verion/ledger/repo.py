@@ -146,15 +146,19 @@ def drop_all(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[None]:
-    """``BEGIN IMMEDIATE`` (serializa escritores, inclusive de outros processos); rollback em exceção."""
+    """``BEGIN IMMEDIATE`` (serializa escritores, inclusive de outros processos); rollback em exceção.
+
+    O ``COMMIT`` fica dentro do ``try``: ele pode falhar (ex.: FK adiado) e, nesse caso, a transação
+    continua aberta no SQLite, então também precisa do ``ROLLBACK``.
+    """
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield
+        conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
-    conn.execute("COMMIT")
 
 
 # --- runs -----------------------------------------------------------------------------------

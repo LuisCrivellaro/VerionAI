@@ -72,6 +72,20 @@ BEGIN
     SELECT RAISE(ABORT, 'tentativa liquidada e imutavel');
 END;
 
+-- A reserva e a identidade da linha nunca mudam, nem enquanto pending: budget valida o SpendToken
+-- contra estes campos e calcula o preço a partir de method. Zerar reserved_brl (e cost_brl junto)
+-- passaria pelos CHECKs e reduziria o gasto registrado.
+CREATE TRIGGER IF NOT EXISTS attempts_reservation_immutable
+BEFORE UPDATE OF reserved_brl, method, run_id, scene_index, attempt_no ON attempts
+WHEN NEW.reserved_brl IS NOT OLD.reserved_brl
+  OR NEW.method IS NOT OLD.method
+  OR NEW.run_id IS NOT OLD.run_id
+  OR NEW.scene_index IS NOT OLD.scene_index
+  OR NEW.attempt_no IS NOT OLD.attempt_no
+BEGIN
+    SELECT RAISE(ABORT, 'reserva e identidade da tentativa sao imutaveis');
+END;
+
 CREATE TRIGGER IF NOT EXISTS attempts_no_delete
 BEFORE DELETE ON attempts
 BEGIN

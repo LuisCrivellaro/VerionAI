@@ -3,13 +3,18 @@
 Escopo: ``src/verion/**`` (``tests/`` fica de fora de propósito: testes podem semear autorização
 e reservas via ``repo``). Regras:
 
-1. ``_SEAL`` só em ``budget.py``.
+1. ``_SEAL``, ``_ISSUED`` e escrita em ``._used`` só em ``budget.py``.
 2. ``insert_pending`` só em ``budget.py`` e ``ledger/repo.py``.
 3. ``add_authorization`` só em ``cli.py`` e ``providers/contract.py`` (a definição em ``repo.py`` não
    conta como uso).
 4. Todo ``generate`` de classe ``*Adapter`` em ``providers/*.py`` e ``local/{ken_burns,parallax}.py``
    recebe ``token`` e começa com ``token.consume(self.method)``. O Protocol de ``providers/base.py``
-   é isento.
+   é isento. A classe precisa definir ``generate`` no próprio corpo com ``def``, sem decoradores
+   (herdado, atribuído ou decorado falha).
+5. SQL de escrita em ``authorizations``/``attempts`` (``INSERT [OR ...] INTO``, ``REPLACE INTO``,
+   ``UPDATE [OR ...]``, ``DELETE FROM``) só em ``ledger/repo.py``.
+6. ``finish_attempt`` (liquidação crua, sem token) só em ``budget.py`` e ``ledger/repo.py``: fora
+   deles, liquidar exige ``budget.settle_*`` com ``SpendToken`` (revisão T1 rodada 2).
 
 As regras são funções puras sobre ``{caminho_relativo: fonte}``; os testes negativos alimentam fontes
 sintéticas para provar que cada regra detecta violações (os diretórios providers/ e local/ ainda não
@@ -19,6 +24,7 @@ existem, então a varredura real passa vacuamente nas regras 3 e 4).
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
@@ -29,6 +35,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "verion"
 SEAL_ALLOWED = frozenset({"budget.py"})
 INSERT_PENDING_ALLOWED = frozenset({"budget.py", "ledger/repo.py"})
 AUTHORIZATION_ALLOWED = frozenset({"cli.py", "providers/contract.py"})
+FINISH_ATTEMPT_ALLOWED = frozenset({"budget.py", "ledger/repo.py"})
 LOCAL_ADAPTER_FILES = frozenset({"local/ken_burns.py", "local/parallax.py"})
 
 
@@ -63,17 +70,58 @@ def _restricted(sources: Mapping[str, str], name: str, allowed: frozenset[str]) 
     return violations
 
 
+def _used_writes(tree: ast.AST) -> list[int]:
+    """Escritas na flag ``_used`` do token: ``x._used = ...``/``del``/``+=`` ou a string ``"_used"``."""
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "_used" and isinstance(node.ctx, ast.Store | ast.Del) or isinstance(node, ast.Constant) and node.value == "_used":
+            lines.append(node.lineno)
+    return lines
+
+
 def check_seal(sources: Mapping[str, str]) -> list[str]:
-    return _restricted(sources, "_SEAL", SEAL_ALLOWED)
+    """Selo, registro de tokens emitidos e flag ``_used``: só em budget.py."""
+    violations = _restricted(sources, "_SEAL", SEAL_ALLOWED) + _restricted(sources, "_ISSUED", SEAL_ALLOWED)
+    for rel, text in sources.items():
+        if rel in SEAL_ALLOWED:
+            continue
+        for line in _used_writes(ast.parse(text, filename=rel)):
+            violations.append(f"{rel}:{line}: escrita proibida em '_used' (permitida só em budget.py)")
+    return violations
 
 
 def check_insert_pending(sources: Mapping[str, str]) -> list[str]:
     return _restricted(sources, "insert_pending", INSERT_PENDING_ALLOWED)
 
 
+def check_finish_attempt(sources: Mapping[str, str]) -> list[str]:
+    return _restricted(sources, "finish_attempt", FINISH_ATTEMPT_ALLOWED)
+
+
 def check_add_authorization(sources: Mapping[str, str]) -> list[str]:
     # A definição em ledger/repo.py é um FunctionDef (não Name/Attribute), logo não é uso.
     return _restricted(sources, "add_authorization", AUTHORIZATION_ALLOWED)
+
+
+RAW_SQL_ALLOWED = frozenset({"ledger/repo.py"})
+_OR_CLAUSE = r"(?:or\s+\w+\s+)?"  # INSERT OR REPLACE / UPDATE OR IGNORE...
+_RAW_LEDGER_WRITE = re.compile(
+    rf"\b(?:insert\s+{_OR_CLAUSE}into\s+|replace\s+into\s+|update\s+{_OR_CLAUSE}|delete\s+from\s+)"
+    r"(?:authorizations|attempts)\b",
+    re.IGNORECASE,
+)
+
+
+def check_raw_ledger_sql(sources: Mapping[str, str]) -> list[str]:
+    """SQL de escrita em ``authorizations``/``attempts`` só em ledger/repo.py (inclui partes de f-string)."""
+    violations = []
+    for rel, text in sources.items():
+        if rel in RAW_SQL_ALLOWED:
+            continue
+        for node in ast.walk(ast.parse(text, filename=rel)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and _RAW_LEDGER_WRITE.search(node.value):
+                violations.append(f"{rel}:{node.lineno}: SQL de escrita no ledger fora de ledger/repo.py")
+    return violations
 
 
 def _is_adapter_file(rel: str) -> bool:
@@ -126,10 +174,24 @@ def check_adapters(sources: Mapping[str, str]) -> list[str]:
         for cls in ast.walk(ast.parse(text, filename=rel)):
             if not (isinstance(cls, ast.ClassDef) and cls.name.endswith("Adapter")):
                 continue
-            for item in cls.body:
-                if not (isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef) and item.name == "generate"):
-                    continue
+            defs = [
+                item
+                for item in cls.body
+                if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef) and item.name == "generate"
+            ]
+            for item in cls.body:  # generate = _gen / generate: T = _gen
+                targets = item.targets if isinstance(item, ast.Assign) else [getattr(item, "target", None)]
+                if isinstance(item, ast.Assign | ast.AnnAssign) and any(
+                    isinstance(t, ast.Name) and t.id == "generate" for t in targets
+                ):
+                    violations.append(f"{rel}:{item.lineno}: {cls.name}.generate atribuído, não definido com def")
+            if not defs:
+                violations.append(f"{rel}:{cls.lineno}: {cls.name} não define generate no próprio corpo")
+            for item in defs:
                 where = f"{rel}:{item.lineno}: {cls.name}.generate"
+                if item.decorator_list:
+                    violations.append(f"{where} não pode ter decoradores")
+                    continue
                 args = item.args
                 names = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
                 if "token" not in names:
@@ -144,8 +206,10 @@ def check_adapters(sources: Mapping[str, str]) -> list[str]:
 ALL_RULES = {
     "_SEAL": check_seal,
     "insert_pending": check_insert_pending,
+    "finish_attempt": check_finish_attempt,
     "add_authorization": check_add_authorization,
     "adapter.generate": check_adapters,
+    "raw_ledger_sql": check_raw_ledger_sql,
 }
 
 
@@ -294,7 +358,84 @@ def test_violations_in_multiple_classes_are_all_reported() -> None:
     assert len(check_adapters({"providers/x.py": bad})) == 2
 
 
-def test_tests_directory_is_out_of_scope() -> None:
-    """Rótulo de escopo: a varredura parte de src/verion e não enxerga tests/."""
-    assert SRC_ROOT.name == "verion" and SRC_ROOT.parent.name == "src"
-    assert "tests" not in {p.name for p in SRC_ROOT.iterdir() if p.is_dir()}
+def test_scan_scope_is_exactly_src_verion(real_sources: dict[str, str]) -> None:
+    """A varredura cobre todo ``.py`` de src/verion e exclui tests/ de propósito (achado 7)."""
+    on_disk = {p.relative_to(SRC_ROOT).as_posix() for p in SRC_ROOT.rglob("*.py")}
+    assert set(real_sources) == on_disk
+    tests_dir = Path(__file__).resolve().parent
+    assert tests_dir.name == "tests" and tests_dir.parent == SRC_ROOT.parents[1]
+    # A exclusão importa: se tests/ entrasse no escopo, as regras 2 e 5 acusariam violações
+    # (os testes semeiam reservas via repo.insert_pending e SQL bruto de propósito).
+    in_tests = load_sources(tests_dir)
+    assert check_insert_pending(in_tests)
+
+
+# --- revisão T1 rodada 1 -------------------------------------------------------------------------
+
+
+def test_adapter_must_define_generate_in_its_own_body() -> None:
+    inherited = "class VeoAdapter(Base):\n    method = 'veo-3.1-fast'\n"
+    assigned = "def _gen(self, request, token):\n    token.consume(self.method)\n\n"
+    assigned += "class VeoAdapter:\n    generate = _gen\n"
+    annotated = "class VeoAdapter:\n    generate: object = _gen\n"
+    decorated = "class VeoAdapter:\n    @wrap\n    def generate(self, request, token):\n        token.consume(self.method)\n"
+    for src in (inherited, assigned, annotated, decorated):
+        assert check_adapters({"providers/veo.py": src}), src
+        assert check_adapters({"local/parallax.py": src}), src
+
+
+def test_issued_registry_and_used_flag_are_restricted_to_budget() -> None:
+    for src in (
+        "from verion.budget import _ISSUED\n",
+        "from verion import budget\nbudget._ISSUED.add(t)\n",
+        "from verion import budget\nbudget._ISSUED[t] = g\n",
+        "object.__setattr__(token, '_used', False)\n",
+        "vars(token)['_used'] = False\n",
+        "token._used = False\n",
+        "setattr(token, '_used', False)\n",
+    ):
+        assert check_seal({"harness.py": src}), src
+    assert check_seal({"budget.py": "_ISSUED = {}\nself._used = True\n"}) == []
+    assert check_seal({"harness.py": "if token._used:\n    pass\n"}) == []  # leitura não é escrita
+
+
+def test_raw_ledger_writes_are_restricted_to_repo() -> None:
+    for sql in (
+        "INSERT INTO authorizations (amount_brl) VALUES (1)",
+        "insert   into\n attempts (id) values (1)",
+        "Update Attempts SET cost_brl = 0",
+        "INSERT OR REPLACE INTO authorizations (id, amount_brl) VALUES (1, 1)",
+        "insert or ignore into attempts (id) values (1)",
+        "REPLACE INTO authorizations (id) VALUES (1)",
+        "UPDATE OR FAIL attempts SET cost_brl = 0",
+        "UPDATE authorizations SET amount_brl = 1e9",
+        "DELETE FROM authorizations",
+        "delete   from attempts",
+    ):
+        src = f"conn.execute({sql!r})\n"
+        assert check_raw_ledger_sql({"harness.py": src}), sql
+        assert check_raw_ledger_sql({"budget.py": src}), sql
+        assert check_raw_ledger_sql({"ledger/repo.py": src}) == []
+    fstring = "conn.execute(f'UPDATE attempts SET cost_brl = {x}')\n"
+    assert check_raw_ledger_sql({"report.py": fstring})
+    assert check_raw_ledger_sql({"report.py": "conn.execute('SELECT * FROM attempts')\n"}) == []
+    for harmless in ("INSERT INTO runs VALUES (1)", "UPDATE runs SET notes = 'x'", "DELETE FROM qc_reviews"):
+        assert check_raw_ledger_sql({"report.py": f"conn.execute({harmless!r})\n"}) == [], harmless
+
+
+def test_real_tree_has_no_raw_ledger_writes_outside_repo(real_sources: dict[str, str]) -> None:
+    assert check_raw_ledger_sql(real_sources) == []
+    assert "raw_ledger_sql" in ALL_RULES
+
+
+def test_finish_attempt_is_flagged_outside_budget_and_repo() -> None:
+    for src in (
+        "from verion.ledger.repo import finish_attempt\n",
+        "from verion.ledger import repo\nrepo.finish_attempt(c, 1, status='ok', cost_brl=0)\n",
+        "f = getattr(repo, 'finish_attempt')\n",
+    ):
+        assert check_finish_attempt({"harness.py": src}), src
+        assert check_finish_attempt({"cli.py": src}), src
+    ok = {"budget.py": "repo.finish_attempt(c, 1)\n", "ledger/repo.py": "def finish_attempt(c): ...\n"}
+    assert check_finish_attempt(ok) == []
+

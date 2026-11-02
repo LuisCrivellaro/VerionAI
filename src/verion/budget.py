@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import sqlite3
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -27,8 +28,23 @@ from verion.ledger.repo import AttemptRow
 # Selo privado: só ``reserve`` o repassa ao construtor. O teste AST proíbe o nome fora deste módulo.
 _SEAL: Final = object()
 
-# Tokens emitidos por ``reserve`` neste processo. Cópias (copy, __new__ + __dict__) não entram aqui.
-_ISSUED: weakref.WeakSet[SpendToken] = weakref.WeakSet()
+
+
+@dataclass(frozen=True, slots=True)
+class _Grant:
+    """Instantâneo imutável do que ``reserve`` emitiu. Vive fora do token, então não é adulterável por ele."""
+
+    conn: sqlite3.Connection
+    prices: PriceTable
+    attempt_id: int
+    attempt_no: int
+    method: str
+    reserved_brl: float
+
+
+# Tokens emitidos por ``reserve`` neste processo, com o instantâneo do que foi emitido. Cópias
+# (copy, __new__ + __dict__) não entram aqui; atributos alterados via ``vars()`` divergem do instantâneo.
+_ISSUED: weakref.WeakKeyDictionary[SpendToken, _Grant] = weakref.WeakKeyDictionary()
 
 _BALANCE_EPS: Final = 1e-9  # tolerância de ponto flutuante na comparação de saldo
 _MIN_COST_BRL: Final = 1e-6  # custo de método pago abaixo disso é tratado como zero
@@ -38,13 +54,22 @@ MIN_SCENE, MAX_SCENE = 1, 12
 class SpendToken:
     """Autorização de uso único para UMA chamada de ``generate``. Só ``reserve`` cria (exige ``_SEAL``).
 
-    Exceção declarada à regra ``frozen``: guarda ``_conn`` e as flags mutáveis ``_used``/``_job_id``.
+    Exceção declarada à regra ``frozen``: só ``_used`` muda depois da criação (``_conn`` é fixo). Os
+    campos públicos são somente leitura. A cada uso, ``_require_issued`` compara todos os atributos com o
+    instantâneo de ``_ISSUED`` (adulteração via ``vars()`` → ``TokenInvalid``) e ``_require_pending``
+    confere método, tentativa e reserva contra a linha ``pending`` do ledger.
     """
 
-    attempt_id: int
-    attempt_no: int
-    method: str
-    reserved_brl: float
+    _MUTABLE: Final = frozenset({"_used"})
+
+    # Declarações para o type checker: os valores são gravados com object.__setattr__ em __init__.
+    _conn: sqlite3.Connection
+    _prices: PriceTable
+    _used: bool
+    _attempt_id: int
+    _attempt_no: int
+    _method: str
+    _reserved_brl: float
 
     def __init__(
         self,
@@ -59,25 +84,73 @@ class SpendToken:
     ) -> None:
         if seal is not _SEAL:
             raise TokenInvalid("SpendToken só pode ser criado por budget.reserve")
-        self._conn = conn
-        self._prices = prices
-        self._used = False
-        self._job_id: str | None = None
-        self.attempt_id = attempt_id
-        self.attempt_no = attempt_no
-        self.method = method
-        self.reserved_brl = reserved_brl
-        _ISSUED.add(self)
+        init = object.__setattr__
+        init(self, "_conn", conn)
+        init(self, "_prices", prices)
+        init(self, "_used", False)
+        init(self, "_attempt_id", attempt_id)
+        init(self, "_attempt_no", attempt_no)
+        init(self, "_method", method)
+        init(self, "_reserved_brl", reserved_brl)
+        _ISSUED[self] = _Grant(conn, prices, attempt_id, attempt_no, method, reserved_brl)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name not in self._MUTABLE:
+            raise AttributeError(f"SpendToken.{name} é somente leitura")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"SpendToken.{name} não pode ser apagado")
+
+    @property
+    def attempt_id(self) -> int:
+        return self._attempt_id
+
+    @property
+    def attempt_no(self) -> int:
+        return self._attempt_no
+
+    @property
+    def method(self) -> str:
+        return self._method
+
+    @property
+    def reserved_brl(self) -> float:
+        return self._reserved_brl
 
     def _require_issued(self) -> None:
-        # ``in`` usa hash por identidade; ``__new__`` sem init e cópias não estão em _ISSUED.
-        if self not in _ISSUED:
+        # Hash por identidade: ``__new__`` sem init e cópias não estão em _ISSUED.
+        grant = _ISSUED.get(self)
+        if grant is None:
             raise TokenInvalid("SpendToken não foi emitido por budget.reserve")
+        try:
+            current: tuple[object, ...] = (
+                self._conn,
+                self._prices,
+                self._attempt_id,
+                self._attempt_no,
+                self._method,
+                self._reserved_brl,
+            )
+        except AttributeError:  # atributo apagado via vars()
+            current = ()
+        issued = (grant.conn, grant.prices, grant.attempt_id, grant.attempt_no, grant.method, grant.reserved_brl)
+        if len(current) != len(issued) or any(
+            a is not b and a != b for a, b in zip(current, issued, strict=True)
+        ):
+            raise TokenInvalid("SpendToken adulterado: campos diferentes dos emitidos por budget.reserve")
+
+    def _require_conn(self, conn: sqlite3.Connection) -> None:
+        if conn is not self._conn:
+            raise TokenInvalid("SpendToken usado com conexão diferente da que fez a reserva")
 
     def _require_pending(self) -> AttemptRow:
-        row = repo.get_attempt(self._conn, self.attempt_id)
+        """Linha ``pending`` da reserva, conferida campo a campo contra o token."""
+        row = repo.get_attempt(self._conn, self._attempt_id)
         if row is None or row.status != "pending":
-            raise TokenInvalid(f"tentativa {self.attempt_id} não está pending")
+            raise TokenInvalid(f"tentativa {self._attempt_id} não está pending")
+        if (row.method, row.attempt_no, row.reserved_brl) != (self._method, self._attempt_no, self._reserved_brl):
+            raise TokenInvalid(f"SpendToken não confere com a tentativa {self._attempt_id} no ledger")
         return row
 
     def consume(self, method: str) -> None:
@@ -85,8 +158,8 @@ class SpendToken:
         self._require_issued()
         if self._used:
             raise TokenInvalid("SpendToken já usado")
-        if method != self.method:
-            raise TokenInvalid(f"SpendToken é do método {self.method!r}, não de {method!r}")
+        if method != self._method:
+            raise TokenInvalid(f"SpendToken é do método {self._method!r}, não de {method!r}")
         self._require_pending()
         self._used = True
 
@@ -97,8 +170,8 @@ class SpendToken:
             raise TokenInvalid("job_accepted antes de consume")
         if not isinstance(job_id, str) or not job_id.strip():
             raise InputError("job_id vazio")
-        repo.set_job_id(self._conn, self.attempt_id, job_id.strip())
-        self._job_id = job_id.strip()
+        self._require_pending()
+        repo.set_job_id(self._conn, self._attempt_id, job_id.strip())
 
 
 def reserve(
@@ -120,11 +193,13 @@ def reserve(
     if paid and not allow_paid:
         raise PaidCallBlocked(f"método pago {method!r} exige --allow-paid")
     cost = prices.cost_brl(method, units)  # PriceMissing / EstimateInvalid (não finito, negativo)
+    if not math.isfinite(cost):
+        raise EstimateInvalid(f"custo não finito para {method!r}: units={units!r}")
     if unit_kind != prices.unit_kind_of(method):
         raise EstimateInvalid(f"unit_kind {unit_kind!r} diverge da tabela de preços para {method!r}")
     if paid and (units <= 0 or round(cost, 6) < _MIN_COST_BRL):
         raise EstimateInvalid(f"estimativa inválida para {method!r}: units={units!r}, custo=R$ {cost!r}")
-    if isinstance(scene_index, bool) or not MIN_SCENE <= scene_index <= MAX_SCENE:
+    if type(scene_index) is not int or not MIN_SCENE <= scene_index <= MAX_SCENE:
         raise InputError(f"cena fora de {MIN_SCENE}..{MAX_SCENE}: {scene_index!r}")
 
     with repo.transaction(conn):  # BEGIN IMMEDIATE; rollback em qualquer exceção
@@ -160,6 +235,22 @@ def reserve(
     )
 
 
+
+def _verified_grant(token: object, conn: sqlite3.Connection) -> _Grant:
+    """Valida o token sem confiar em nada que ele mesmo forneça (métodos ou atributos).
+
+    Exige o tipo exato (subclasse com ``_require_issued`` vazio → ``TokenInvalid``), chama as checagens
+    pela classe (um método gravado no ``__dict__`` da instância não é usado) e devolve o ``_Grant``
+    imutável de ``_ISSUED``, de onde ``settle_*`` leem preços, conexão e identidade.
+    """
+    if type(token) is not SpendToken:
+        raise TokenInvalid("settle exige SpendToken emitido por budget.reserve (subclasses são recusadas)")
+    SpendToken._require_issued(token)
+    grant = _ISSUED[token]
+    if conn is not grant.conn:
+        raise TokenInvalid("SpendToken usado com conexão diferente da que fez a reserva")
+    return grant
+
 def settle_ok(
     conn: sqlite3.Connection,
     token: SpendToken,
@@ -172,16 +263,20 @@ def settle_ok(
     provider_job_id: str | None,
 ) -> AttemptRow:
     """Liquida com sucesso, gravando o custo real calculado pela tabela a partir de ``units``."""
-    token._require_issued()
-    paid = token._prices.is_paid(token.method)
-    cost = token._prices.cost_brl(token.method, units)  # EstimateInvalid se não finito/negativo
-    if paid and (units <= 0 or round(cost, 6) < _MIN_COST_BRL):
-        raise EstimateInvalid(f"unidades inválidas na liquidação de {token.method!r}: {units!r}")
+    grant = _verified_grant(token, conn)
+    if object.__getattribute__(token, "_used") is not True:
+        raise TokenInvalid("settle_ok exige token consumido por generate")
     with repo.transaction(conn):
-        token._require_pending()
+        row = SpendToken._require_pending(token)
+        method = row.method  # preço sempre pelo método gravado no ledger
+        cost = grant.prices.cost_brl(method, units)  # EstimateInvalid se não finito/negativo
+        if not math.isfinite(cost) or (
+            grant.prices.is_paid(method) and (units <= 0 or round(cost, 6) < _MIN_COST_BRL)
+        ):
+            raise EstimateInvalid(f"unidades inválidas na liquidação de {method!r}: {units!r}")
         return repo.finish_attempt(
             conn,
-            token.attempt_id,
+            grant.attempt_id,
             status="ok",
             cost_brl=cost,
             cost_is_estimate=cost_is_estimate,
@@ -204,21 +299,25 @@ def settle_error(
     provider_job_id: str | None,
 ) -> AttemptRow:
     """Liquida com erro: custo = max(faturado, reserva). Funciona mesmo sem ``consume`` prévio."""
-    token._require_issued()
-    billed = billed_units
-    if isinstance(billed, bool) or not isinstance(billed, int | float) or not math.isfinite(billed) or billed < 0:
-        billed = 0.0  # lixo do provedor não pode reduzir a reserva
-    billed_cost = token._prices.cost_brl(token.method, billed)
+    grant = _verified_grant(token, conn)
+    billed = _billed_or_none(billed_units)
     message = error if isinstance(error, str) and error.strip() else "erro sem mensagem"
+    if billed is None:
+        message += f" [billed_units inválido ignorado: {billed_units!r}]"
+        billed = 0.0
     with repo.transaction(conn):
-        row = token._require_pending()
+        row = SpendToken._require_pending(token)
+        billed_cost = grant.prices.cost_brl(row.method, billed)
+        if not math.isfinite(billed_cost):
+            message += f" [custo faturado não finito ignorado: {billed_units!r}]"
+            billed_cost = 0.0
         if billed_cost > row.reserved_brl:
             cost, units = billed_cost, billed
         else:
             cost, units = row.reserved_brl, row.units  # unidades consistentes com o custo gravado
         return repo.finish_attempt(
             conn,
-            token.attempt_id,
+            grant.attempt_id,
             status="error",
             cost_brl=cost,
             cost_is_estimate=True,
@@ -229,3 +328,14 @@ def settle_error(
             provider_job_id=provider_job_id,
             error=message,
         )
+
+
+def _billed_or_none(value: object) -> float | None:
+    """Converte unidades faturadas (int, float, Decimal, numpy...) ou ``None`` se inválidas."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None

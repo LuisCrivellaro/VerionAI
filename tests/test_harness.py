@@ -831,3 +831,42 @@ def test_harness_module_has_no_forbidden_spend_entry_points() -> None:
     source = Path(harness.__file__).read_text(encoding="utf-8")
     for forbidden in ("insert_pending", "finish_attempt", "add_authorization", "_SEAL", "_ISSUED"):
         assert forbidden not in source
+
+
+# --- revisão T3/T5 (rodada 1): reserva órfã, run_id na exceção ----------------------------------
+
+
+def test_clock_failure_right_after_reserve_does_not_leave_pending(
+    conn: sqlite3.Connection,
+    script: Script,
+    prices: PriceTable,
+    authorize: Callable[[float], int],
+    data_dir: Path,
+) -> None:
+    authorize(1000.0)
+    boom = RuntimeError("relógio quebrado")
+
+    def broken_clock() -> float:
+        raise boom
+
+    with pytest.raises(RuntimeError) as info:
+        run_scenes(
+            conn, script, fake_adapter(prices, "ok"), prices, allow_paid=True, data_dir=data_dir, clock=broken_clock
+        )
+    assert info.value is boom
+    (attempt,) = repo.list_attempts(conn)
+    assert attempt.status == "error"  # nunca pending órfã
+    assert attempt.cost_brl == attempt.reserved_brl
+
+
+def test_exception_carries_run_id(
+    conn: sqlite3.Connection,
+    prices: PriceTable,
+    authorize: Callable[[float], int],
+    run: Callable[..., RunSummary],
+) -> None:
+    authorize(1000.0)
+    with pytest.raises(KeyboardInterrupt) as info:
+        run(RaisingAdapter(prices, KeyboardInterrupt()))
+    assert getattr(info.value, "verion_run_id", None) == only_run_id(conn)
+    assert any(f"run_id={only_run_id(conn)}" in note for note in getattr(info.value, "__notes__", []))

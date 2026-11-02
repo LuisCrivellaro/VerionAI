@@ -148,3 +148,20 @@ def test_delivery_format_rejects_each_deviation(override: dict[str, Any]) -> Non
 
 def test_delivery_format_accepts_equivalent_30_fps_fraction() -> None:
     assert ffmpeg.is_delivery_format(_delivery(fps="60/2"))
+
+
+def test_run_never_inherits_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ffmpeg interativo consome teclas do terminal ('q' encerra a codificação): stdin sempre DEVNULL."""
+    import subprocess
+
+    from verion.local import ffmpeg as ff
+
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ff.subprocess, "run", fake_run)
+    ff.run(["-version"])
+    assert seen.get("stdin") is subprocess.DEVNULL

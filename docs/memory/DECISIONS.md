@@ -1,5 +1,18 @@
 # Decisões (a mais recente no topo)
 
+## 2026-11-02 · ADR-007 · Harness relança erros; run travado ao roteiro; enquadramento 16:9
+- **Erros relançados:** `run_scenes` relança toda exceção depois de liquidar com a reserva (spec 3.5).
+  - A exceção leva `verion_run_id` e a nota `run_id=N`.
+  - `RunSummary.errors` e `stopped_by` ficam reservados, sempre 0 e `None` num retorno normal.
+- **Run travado ao roteiro:** continuar um run (`--run`) exige o mesmo método, `property_id` e `sha256` do roteiro.
+  - Mudar o prompt para "refazer" exige um run novo, e isso zera o limite de 3 tentativas por cena.
+  - Aceito porque cada tentativa continua passando pela reserva e pelo teto autorizado: o dinheiro segue protegido.
+  - A rastreabilidade (vereditos de QC ligados ao roteiro exato) vale mais que o contador.
+- **Enquadramento:** o Ken Burns recorta ao centro em 16:9.
+  - Uma foto 4:3 perde 25% da altura, e uma foto em retrato mostra só cerca de 42%.
+  - Não é defeito de fidelidade (nada é inventado), mas é **risco de produto**: o QC humano compara o recorte com a foto inteira, e o relatório ao cliente declara o enquadramento.
+- **EXIF:** o ffmpeg 6.1.1 aplica a orientação EXIF (medido pelo revisor). Falta um teste que fixe esse comportamento, previsto para a T6 ou T7.
+
 ## 2026-11-02 · ADR-006 · Trava de gasto da T1: desvios aceitos e endurecimento
 Foram aceitos estes desvios, revisados nas evidências 06 e 07:
 - `_MIN_COST_BRL`: custo arredondado a 6 casas abaixo de 1e-6 gera `EstimateInvalid`.

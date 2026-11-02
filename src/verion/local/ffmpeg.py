@@ -72,7 +72,12 @@ def run(args: list[str], *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> None:
 def _execute(cmd: list[str], timeout_s: float) -> str:
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, check=False, timeout=timeout_s
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+            stdin=subprocess.DEVNULL,  # ffmpeg interativo leria teclas do terminal ('q' encerra)
         )
     except FileNotFoundError as exc:
         raise FfmpegError(

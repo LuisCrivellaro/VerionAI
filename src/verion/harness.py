@@ -144,9 +144,11 @@ def run_scenes(
                 skipped[index] = str(exc)
                 continue
 
-            attempted += 1
-            started = clock()
+            # Tudo depois da reserva fica dentro do try: até o relógio pode falhar sem deixar pending órfã.
+            started: float | None = None
             try:
+                attempted += 1
+                started = clock()
                 out_path = data_dir / "runs" / str(run_id) / gen.method / f"s{index:02d}_t{token.attempt_no}.mp4"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 req = SceneRequest(scene=scene, run_id=run_id, attempt_no=token.attempt_no, out_path=out_path)
@@ -175,18 +177,27 @@ def run_scenes(
                         token,
                         billed_units=billed,
                         error=_describe(exc),
-                        wall_time_s=clock() - started,
+                        wall_time_s=_elapsed(clock, started),
                         provider_job_id=job_id,
                     )
                 except Exception as settle_exc:  # noqa: BLE001  (não pode mascarar a causa original)
-                    # Não mascara a causa: a tentativa fica `pending` (a reserva continua no gasto).
-                    exc.add_note(
-                        f"liquidação falhou ({_describe(settle_exc)}); a tentativa {token.attempt_id} "
-                        "segue pending com a reserva: use `verion ledger settle`"
-                    )
+                    # Não mascara a causa. Só orienta `ledger settle` se a linha realmente seguir pending.
+                    if _still_pending(conn, token.attempt_id):
+                        exc.add_note(
+                            f"liquidação falhou ({_describe(settle_exc)}); a tentativa {token.attempt_id} "
+                            "segue pending com a reserva: use `verion ledger settle`"
+                        )
                 raise
             ok += 1
             cost_brl += row.cost_brl
+    except BaseException as exc:
+        # O chamador (CLI, T4) precisa do run para reportar e liquidar: anexa o id à exceção.
+        try:
+            exc.verion_run_id = run_id  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+        exc.add_note(f"run_id={run_id}")
+        raise
     finally:
         repo.finish_run(conn, run_id)
 
@@ -199,3 +210,22 @@ def run_scenes(
         skipped=MappingProxyType(skipped),
         stopped_by=None,
     )
+
+
+def _elapsed(clock: Callable[[], float], started: float | None) -> float:
+    """Tempo desde ``started``; 0.0 se o relógio falhou (a liquidação não pode depender dele)."""
+    if started is None:
+        return 0.0
+    try:
+        return max(0.0, clock() - started)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _still_pending(conn: sqlite3.Connection, attempt_id: int) -> bool:
+    try:
+        row = repo.get_attempt(conn, attempt_id)
+    except Exception:  # noqa: BLE001
+        return True
+    return row is not None and row.status == "pending"
+

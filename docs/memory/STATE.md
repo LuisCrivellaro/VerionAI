@@ -1,6 +1,6 @@
 # Estado do projeto
 
-Atualizado: 2026-11-01
+Atualizado: 2026-11-02
 
 ## Fase atual
 **Fase 0 — validação audiovisual** (ainda não iniciada). Ambiente de agentes configurado nesta data.
@@ -12,13 +12,9 @@ Atualizado: 2026-11-01
 - [x] Spec corrigida pelo verion-architect (rodada 2, 364 linhas, changelog na seção 7)
 - [x] Revisão rodada 2: 11/12 resolvidos + 2 bloqueantes novos corrigidos pelo supervisor → **spec aprovada** (evidência 05)
 - [x] Skill de QC com gemini-omni; `config/prices.toml` (Omni = hipótese); AGENT_ARCHITECTURE.md e AGENT_SKILLS.md
-- [ ] **T1: REVISÃO RODADA 1 = MUDANÇAS NECESSÁRIAS (evidência 06) — PRÓXIMO PASSO: terminar as correções no branch `wip/t1-revisao`**
-  - Correções 1–7 da evidência 06 foram iniciadas e interrompidas. Estão em `wip/t1-revisao` (commit `17a22f8`), com 195 testes verdes e 9 vermelhos. `setup/agent-team` continua verde (173).
-  - Feito: `pyproject.toml`, `uv.lock`, `.gitignore`, `config/prices.example.toml`, `src/verion/{__init__,errors,config,budget}.py`, `src/verion/ledger/{__init__.py,repo.py,schema.sql}`, `tests/{conftest,test_config,test_ledger,test_budget,test_architecture}.py` → **173 testes passando** (`uv run pytest`, 0,96 s, verificado pelo supervisor).
-  - Desvios declarados pelo autor (a revisar): `_MIN_COST_BRL` (custo arredondado a 6 casas < 1e-6 → `EstimateInvalid`), `_BALANCE_EPS = 1e-9` no saldo, `WeakSet _ISSUED` além do `_SEAL`, token guarda `prices`; regra 4 do AST é vácua até T2/T5 criarem adaptadores.
-  - Nota de ambiente: os agentes `verion-*` só carregam no início da sessão; nesta sessão a delegação usou `general-purpose` com a definição do agente no prompt.
-  - Falta: concluir correções, rodada 2 de revisão (última), registrar desvios aceitos em DECISIONS.md, merge do wip em setup/agent-team, commit e push.
-  - Depois: T2 e então {T3, T5, T8, T9} conforme FASE0_HARNESS.md.
+- [x] **T1 concluída e aprovada** (evidências 06 e 07): config, errors, ledger SQLite e trava de gasto (`SpendToken`, reserva `pending` em `BEGIN IMMEDIATE`, triggers, AST). **219 testes verdes**, ruff limpo. ADR-006.
+- [ ] **T2 (verion-backend/ai-engineer conforme spec) — PRÓXIMO PASSO**: `providers/base.py`, registry, helper de contrato, `fake`. Incluir a pendência da regra 4 (conferir `METHODS`) e corrigir o erro de mypy em `repo.py:349`.
+- [ ] Depois: {T3, T5, T8, T9} → {T6, T7} → T4 → T12. T10/T11 bloqueadas por decisão do usuário.
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 
 ## Autorizações de gasto

@@ -1,5 +1,21 @@
 # Decisões (a mais recente no topo)
 
+## 2026-11-02 · ADR-006 · Trava de gasto da T1: desvios aceitos e endurecimento
+Foram aceitos estes desvios, revisados nas evidências 06 e 07:
+- `_MIN_COST_BRL`: custo arredondado a 6 casas abaixo de 1e-6 gera `EstimateInvalid`.
+- `_BALANCE_EPS = 1e-9` na conta do saldo.
+- O token guarda `prices`.
+- `settle_error` aceita token não consumido, para registrar a reserva quando o adaptador falha antes do `consume`.
+
+Endurecimento:
+- O registro `_ISSUED` (`WeakKeyDictionary`) guarda um `_Grant` imutável por token.
+- `settle_*` leem preços, conexão e id só do `_Grant` e exigem o tipo exato `SpendToken`.
+- O trigger `attempts_reservation_immutable` impede alterar `reserved_brl`, `method`, `run_id`, `scene_index` e `attempt_no`.
+- A regra 6 do AST restringe `finish_attempt` a `budget.py` e `ledger/repo.py`.
+
+O esquema continua na versão 1: o trigger entrou sem migração, porque ainda não existe banco real.
+O limite fica declarado: reflexão e escrita direta no SQLite contornam a trava. As barreiras reais são a chave de API e a autorização.
+
 ## 2026-10-31 · ADR-005 · Harness da Fase 0: adaptador síncrono + ledger SQLite com guarda de orçamento
 Status: proposta (aguarda revisão do verion-code-reviewer). Spec: `docs/engineering/FASE0_HARNESS.md`.
 Todo método (Ken Burns, parallax 2,5D, Veo, Gemini Omni, Kling, Wan) implementa o Protocol `SceneGenerator`

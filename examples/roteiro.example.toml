@@ -1,0 +1,111 @@
+# Roteiro de EXEMPLO da Fase 0 (12 cenas). As fotos em examples/fotos/ são imagens sintéticas
+# (gradiente + moldura), geradas só para testes: não representam nenhum imóvel.
+#
+# Regras (verion.script.load_script):
+#   - property_id: id neutro, ^[a-z0-9-]{1,32}$ (nunca endereço, nome ou telefone);
+#   - exatamente 12 [[scenes]], index 1..12 sem repetição;
+#   - photo: caminho relativo a ESTA pasta (ou absoluto); o arquivo precisa existir;
+#   - camera: push-in | pull-out | pan-left | pan-right | static;
+#   - duration_s: duração alvo, de 3.0 a 10.0 s;
+#   - prompt: descreve SÓ o movimento de câmera. Nunca cite objeto, pessoa ou detalhe que não esteja
+#     na foto (regra de fidelidade visual do VÉRION).
+# Fotos reais de imóveis ficam em data/ (fora do git), com autorização escrita do proprietário.
+
+property_id = "exemplo-sintetico"
+
+[[scenes]]
+index = 1
+photo = "fotos/01-sala.jpg"
+room = "sala"
+camera = "push-in"
+duration_s = 6.0
+prompt = "Push-in lento e contínuo em direção ao centro do ambiente. Não adicionar objetos, pessoas ou mudanças de luz."
+negative_prompt = "pessoas, animais, objetos novos, móveis novos"
+
+[[scenes]]
+index = 2
+photo = "fotos/02-cozinha.jpg"
+room = "cozinha"
+camera = "pan-right"
+duration_s = 5.0
+prompt = "Pan lateral suave da esquerda para a direita. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 3
+photo = "fotos/03-suite.jpg"
+room = "suíte"
+camera = "pull-out"
+duration_s = 5.0
+prompt = "Pull-out lento revelando o ambiente. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 4
+photo = "fotos/04-banheiro.jpg"
+room = "banheiro"
+camera = "static"
+duration_s = 3.0
+prompt = "Câmera estática com variação mínima de luz natural já presente na foto. Não adicionar objetos nem pessoas."
+
+[[scenes]]
+index = 5
+photo = "fotos/05-varanda.jpg"
+room = "varanda"
+camera = "pan-left"
+duration_s = 6.0
+prompt = "Pan lateral suave da direita para a esquerda. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 6
+photo = "fotos/06-escritorio.jpg"
+room = "escritório"
+camera = "push-in"
+duration_s = 4.0
+prompt = "Push-in curto e lento. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 7
+photo = "fotos/07-quarto-2.jpg"
+room = "quarto 2"
+camera = "pull-out"
+duration_s = 5.0
+prompt = "Pull-out lento revelando o ambiente. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 8
+photo = "fotos/08-lavabo.jpg"
+room = "lavabo"
+camera = "static"
+duration_s = 3.0
+prompt = "Câmera estática. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 9
+photo = "fotos/09-piscina.jpg"
+room = "piscina"
+camera = "pan-right"
+duration_s = 8.0
+prompt = "Pan lateral lento da esquerda para a direita. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 10
+photo = "fotos/10-jardim.jpg"
+room = "jardim"
+camera = "push-in"
+duration_s = 6.0
+prompt = "Push-in lento em direção ao fundo do jardim. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 11
+photo = "fotos/11-garagem.jpg"
+room = "garagem"
+camera = "pan-left"
+duration_s = 4.0
+prompt = "Pan lateral suave da direita para a esquerda. Não adicionar objetos, pessoas ou mudanças de luz."
+
+[[scenes]]
+index = 12
+photo = "fotos/12-fachada.jpg"
+room = "fachada"
+camera = "pull-out"
+duration_s = 10.0
+prompt = "Pull-out lento e amplo revelando a fachada. Não adicionar objetos, pessoas ou mudanças de luz."

@@ -259,18 +259,18 @@ def test_list_attempts_filters(conn: sqlite3.Connection) -> None:
 
 def test_schema_checks_reject_bad_rows(conn: sqlite3.Connection) -> None:
     run_id = make_run(conn)
-    base = dict(
-        run_id=run_id,
-        scene_index=1,
-        attempt_no=1,
-        target_s=5.0,
-        method="fake",
-        provider="fake",
-        model="m",
-        units=1.0,
-        unit_kind="video_seconds",
-        reserved_brl=1.0,
-    )
+    base = {
+        "run_id": run_id,
+        "scene_index": 1,
+        "attempt_no": 1,
+        "target_s": 5.0,
+        "method": "fake",
+        "provider": "fake",
+        "model": "m",
+        "units": 1.0,
+        "unit_kind": "video_seconds",
+        "reserved_brl": 1.0,
+    }
     for override in ({"scene_index": 13}, {"scene_index": 0}, {"attempt_no": 4}, {"reserved_brl": -1.0}):
         with pytest.raises(sqlite3.IntegrityError):
             repo.insert_pending(conn, **{**base, **override})  # type: ignore[arg-type]

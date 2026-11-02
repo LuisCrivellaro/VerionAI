@@ -519,7 +519,7 @@ def test_ok_without_qc_blocks_next_reserve_until_verdict(
 def test_attempt_rule_errors_are_not_spend_blocked(conn: sqlite3.Connection, prices: PriceTable) -> None:
     """Free method: AttemptRuleError sobe sem criar linha (o harness põe a cena em `skipped`)."""
     run_id = make_run(conn, "ken-burns")
-    kwargs = dict(method="ken-burns", units=0.0, unit_kind="none", allow_paid=False)
+    kwargs = {"method": "ken-burns", "units": 0.0, "unit_kind": "none", "allow_paid": False}
     token = reserve(conn, prices, run_id, **kwargs)  # type: ignore[arg-type]
     settle_ok(conn, token, units=0.0)
     with pytest.raises(errors.AwaitingQC):
@@ -529,9 +529,9 @@ def test_attempt_rule_errors_are_not_spend_blocked(conn: sqlite3.Connection, pri
 
 # --- revisão T1 rodada 1 ----------------------------------------------------------------------
 
-from decimal import Decimal  # noqa: E402
+from decimal import Decimal
 
-import numpy as np  # noqa: E402
+import numpy as np
 
 
 @pytest.mark.parametrize(
@@ -693,6 +693,57 @@ def test_token_cannot_be_deleted_attribute(conn: sqlite3.Connection, prices: Pri
     authorize(100.0)
     token = reserve(conn, prices, make_run(conn), units=2.0)
     with pytest.raises(AttributeError):
-        del token._method  # type: ignore[attr-defined]  # noqa: SLF001
+        del token._method  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         token.brand_new_attribute = 1  # type: ignore[attr-defined]
+
+
+# --- revisão T1 rodada 2: settle não confia em métodos/atributos do próprio token -----------------
+
+
+class _FreePrices:
+    """Tabela 'grátis' maliciosa: tudo custa zero e nada é pago."""
+
+    def cost_brl(self, method: str, units: float) -> float:
+        return 0.0
+
+    def is_paid(self, method: str) -> bool:
+        return False
+
+
+def test_subclass_token_with_noop_checks_cannot_settle_for_free(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize
+) -> None:
+    authorize(100.0)
+    real = reserve(conn, prices, make_run(conn), units=5.0)
+    real.consume("fake")
+
+    class Evil(SpendToken):
+        def _require_issued(self) -> None:  # anula a checagem
+            return None
+
+    evil = Evil.__new__(Evil)
+    for name in ("_conn", "_used", "_attempt_id", "_attempt_no", "_method", "_reserved_brl"):
+        object.__setattr__(evil, name, object.__getattribute__(real, name))
+    object.__setattr__(evil, "_prices", _FreePrices())
+    with pytest.raises(budget.TokenInvalid):
+        budget.settle_ok(
+            conn, evil, units=5.0, cost_is_estimate=False, clip_path=Path("c.mp4"),
+            duration_s=5.0, wall_time_s=1.0, provider_job_id=None,
+        )
+    with pytest.raises(budget.TokenInvalid):
+        budget.settle_error(conn, evil, billed_units=0.0, error="x", wall_time_s=1.0, provider_job_id=None)
+    assert repo.spent_brl(conn) == pytest.approx(5.0)  # a reserva continua contando
+
+
+def test_instance_level_method_override_does_not_bypass_settle(
+    conn: sqlite3.Connection, prices: PriceTable, authorize: Authorize
+) -> None:
+    authorize(100.0)
+    token = reserve(conn, prices, make_run(conn), units=5.0)
+    token.consume("fake")
+    object.__setattr__(token, "_require_issued", lambda: None)
+    object.__setattr__(token, "_prices", _FreePrices())
+    with pytest.raises(budget.TokenInvalid):
+        settle_ok(conn, token, units=5.0, consume=False)
+    assert repo.spent_brl(conn) == pytest.approx(5.0)

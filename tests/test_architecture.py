@@ -13,6 +13,8 @@ e reservas via ``repo``). Regras:
    (herdado, atribuído ou decorado falha).
 5. SQL de escrita em ``authorizations``/``attempts`` (``INSERT [OR ...] INTO``, ``REPLACE INTO``,
    ``UPDATE [OR ...]``, ``DELETE FROM``) só em ``ledger/repo.py``.
+6. ``finish_attempt`` (liquidação crua, sem token) só em ``budget.py`` e ``ledger/repo.py``: fora
+   deles, liquidar exige ``budget.settle_*`` com ``SpendToken`` (revisão T1 rodada 2).
 
 As regras são funções puras sobre ``{caminho_relativo: fonte}``; os testes negativos alimentam fontes
 sintéticas para provar que cada regra detecta violações (os diretórios providers/ e local/ ainda não
@@ -33,6 +35,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "verion"
 SEAL_ALLOWED = frozenset({"budget.py"})
 INSERT_PENDING_ALLOWED = frozenset({"budget.py", "ledger/repo.py"})
 AUTHORIZATION_ALLOWED = frozenset({"cli.py", "providers/contract.py"})
+FINISH_ATTEMPT_ALLOWED = frozenset({"budget.py", "ledger/repo.py"})
 LOCAL_ADAPTER_FILES = frozenset({"local/ken_burns.py", "local/parallax.py"})
 
 
@@ -71,9 +74,7 @@ def _used_writes(tree: ast.AST) -> list[int]:
     """Escritas na flag ``_used`` do token: ``x._used = ...``/``del``/``+=`` ou a string ``"_used"``."""
     lines: list[int] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == "_used" and isinstance(node.ctx, ast.Store | ast.Del):
-            lines.append(node.lineno)
-        elif isinstance(node, ast.Constant) and node.value == "_used":  # setattr(t, "_used", ...)
+        if isinstance(node, ast.Attribute) and node.attr == "_used" and isinstance(node.ctx, ast.Store | ast.Del) or isinstance(node, ast.Constant) and node.value == "_used":
             lines.append(node.lineno)
     return lines
 
@@ -91,6 +92,10 @@ def check_seal(sources: Mapping[str, str]) -> list[str]:
 
 def check_insert_pending(sources: Mapping[str, str]) -> list[str]:
     return _restricted(sources, "insert_pending", INSERT_PENDING_ALLOWED)
+
+
+def check_finish_attempt(sources: Mapping[str, str]) -> list[str]:
+    return _restricted(sources, "finish_attempt", FINISH_ATTEMPT_ALLOWED)
 
 
 def check_add_authorization(sources: Mapping[str, str]) -> list[str]:
@@ -201,6 +206,7 @@ def check_adapters(sources: Mapping[str, str]) -> list[str]:
 ALL_RULES = {
     "_SEAL": check_seal,
     "insert_pending": check_insert_pending,
+    "finish_attempt": check_finish_attempt,
     "add_authorization": check_add_authorization,
     "adapter.generate": check_adapters,
     "raw_ledger_sql": check_raw_ledger_sql,
@@ -420,3 +426,16 @@ def test_raw_ledger_writes_are_restricted_to_repo() -> None:
 def test_real_tree_has_no_raw_ledger_writes_outside_repo(real_sources: dict[str, str]) -> None:
     assert check_raw_ledger_sql(real_sources) == []
     assert "raw_ledger_sql" in ALL_RULES
+
+
+def test_finish_attempt_is_flagged_outside_budget_and_repo() -> None:
+    for src in (
+        "from verion.ledger.repo import finish_attempt\n",
+        "from verion.ledger import repo\nrepo.finish_attempt(c, 1, status='ok', cost_brl=0)\n",
+        "f = getattr(repo, 'finish_attempt')\n",
+    ):
+        assert check_finish_attempt({"harness.py": src}), src
+        assert check_finish_attempt({"cli.py": src}), src
+    ok = {"budget.py": "repo.finish_attempt(c, 1)\n", "ledger/repo.py": "def finish_attempt(c): ...\n"}
+    assert check_finish_attempt(ok) == []
+

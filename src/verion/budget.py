@@ -235,6 +235,22 @@ def reserve(
     )
 
 
+
+def _verified_grant(token: object, conn: sqlite3.Connection) -> _Grant:
+    """Valida o token sem confiar em nada que ele mesmo forneça (métodos ou atributos).
+
+    Exige o tipo exato (subclasse com ``_require_issued`` vazio → ``TokenInvalid``), chama as checagens
+    pela classe (um método gravado no ``__dict__`` da instância não é usado) e devolve o ``_Grant``
+    imutável de ``_ISSUED``, de onde ``settle_*`` leem preços, conexão e identidade.
+    """
+    if type(token) is not SpendToken:
+        raise TokenInvalid("settle exige SpendToken emitido por budget.reserve (subclasses são recusadas)")
+    SpendToken._require_issued(token)
+    grant = _ISSUED[token]
+    if conn is not grant.conn:
+        raise TokenInvalid("SpendToken usado com conexão diferente da que fez a reserva")
+    return grant
+
 def settle_ok(
     conn: sqlite3.Connection,
     token: SpendToken,
@@ -247,21 +263,20 @@ def settle_ok(
     provider_job_id: str | None,
 ) -> AttemptRow:
     """Liquida com sucesso, gravando o custo real calculado pela tabela a partir de ``units``."""
-    token._require_issued()
-    token._require_conn(conn)
-    if not token._used:
+    grant = _verified_grant(token, conn)
+    if object.__getattribute__(token, "_used") is not True:
         raise TokenInvalid("settle_ok exige token consumido por generate")
     with repo.transaction(conn):
-        row = token._require_pending()
+        row = SpendToken._require_pending(token)
         method = row.method  # preço sempre pelo método gravado no ledger
-        cost = token._prices.cost_brl(method, units)  # EstimateInvalid se não finito/negativo
+        cost = grant.prices.cost_brl(method, units)  # EstimateInvalid se não finito/negativo
         if not math.isfinite(cost) or (
-            token._prices.is_paid(method) and (units <= 0 or round(cost, 6) < _MIN_COST_BRL)
+            grant.prices.is_paid(method) and (units <= 0 or round(cost, 6) < _MIN_COST_BRL)
         ):
             raise EstimateInvalid(f"unidades inválidas na liquidação de {method!r}: {units!r}")
         return repo.finish_attempt(
             conn,
-            token.attempt_id,
+            grant.attempt_id,
             status="ok",
             cost_brl=cost,
             cost_is_estimate=cost_is_estimate,
@@ -284,16 +299,15 @@ def settle_error(
     provider_job_id: str | None,
 ) -> AttemptRow:
     """Liquida com erro: custo = max(faturado, reserva). Funciona mesmo sem ``consume`` prévio."""
-    token._require_issued()
-    token._require_conn(conn)
+    grant = _verified_grant(token, conn)
     billed = _billed_or_none(billed_units)
     message = error if isinstance(error, str) and error.strip() else "erro sem mensagem"
     if billed is None:
         message += f" [billed_units inválido ignorado: {billed_units!r}]"
         billed = 0.0
     with repo.transaction(conn):
-        row = token._require_pending()
-        billed_cost = token._prices.cost_brl(row.method, billed)
+        row = SpendToken._require_pending(token)
+        billed_cost = grant.prices.cost_brl(row.method, billed)
         if not math.isfinite(billed_cost):
             message += f" [custo faturado não finito ignorado: {billed_units!r}]"
             billed_cost = 0.0
@@ -303,7 +317,7 @@ def settle_error(
             cost, units = row.reserved_brl, row.units  # unidades consistentes com o custo gravado
         return repo.finish_attempt(
             conn,
-            token.attempt_id,
+            grant.attempt_id,
             status="error",
             cost_brl=cost,
             cost_is_estimate=True,

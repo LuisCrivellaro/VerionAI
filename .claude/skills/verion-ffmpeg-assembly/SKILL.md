@@ -62,7 +62,10 @@ ffmpeg -y -i cena.mp4 -vf "drawtext=fontfile='$FONT':text='DEMONSTRAÇÃO':fonts
 
 ```bash
 ffmpeg -y -i final.mp4 -vf "fps=1,scale=480:-1" qc_%03d.jpg
-ffmpeg -y -i final.mp4 -vf "fps=1,scale=320:-1,tile=4x4" -frames:v 1 qc_contato.jpg
+# folha de contato: 4 colunas e LINHAS = ceil(n_quadros/4); tile=4x4 cortaria o vídeo no 16º segundo
+ffmpeg -y -i final.mp4 -vf "fps=1,scale=320:-1,tile=4x$LINHAS" -frames:v 1 qc_contato.jpg
+# último quadro real (o QC compara primeiro e último com a foto): sobrescreve até o fim
+ffmpeg -y -sseof -0.5 -i final.mp4 -update 1 qc_ultimo.jpg
 ```
 
 ## Fonte

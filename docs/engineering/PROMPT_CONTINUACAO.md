@@ -52,7 +52,9 @@ Luis Crivellaro: estudante de Engenharia de Software (FIAP), empreendedor, quer 
 
 **T2 concluída e aprovada** (contrato dos adaptadores, registry, helper de contrato e `fake`): 344 testes verdes, evidências 08 e 09. Leia as pendências da evidência 09 antes de delegar T8 e T9.
 
-**T3 e T5 concluídas e aprovadas** (harness e Ken Burns com ffmpeg real): 544 testes verdes, evidência 10, ADR-007.
+**T3 e T5 concluídas e aprovadas** (harness e Ken Burns com ffmpeg real): evidência 10, ADR-007.
+
+**T6 e T7 concluídas e aprovadas** (parallax 2,5D e montagem/QC): 655 testes verdes, evidência 11, ADR-008.
 
 ## 4. O que fazer agora (em ordem)
 
@@ -60,7 +62,7 @@ Luis Crivellaro: estudante de Engenharia de Software (FIAP), empreendedor, quer 
    - Se não aparecerem para a ferramenta Agent, copie `.claude/agents/verion-*.md` para `~/.claude/agents/`.
    - Se continuarem sem aparecer, delegue a `general-purpose` com a definição do agente (o arquivo `.md`) no prompt.
    - Não reinstale skills nem o plugin.
-2. **Siga a ordem da spec (prontas: T1, T2, T3, T5; próximo: {T6, T7} e {T8, T9}, depois T4 e T12):**
+2. **Siga a ordem da spec (prontas: T1, T2, T3, T5, T6, T7; próximo: {T8, T9}, depois T4 e T12):**
    - Faça a T2. A regra 4 do AST deve conferir os caminhos de `METHODS` contra as classes verificadas. Corrija também o erro de `mypy` em `ledger/repo.py:349` (`list_attempts`).
    - Depois {T3, T5, T8, T9}, em paralelo só quando não houver arquivos em comum. A T3 testa que uma exceção em `settle_ok` cai em `settle_error` com a reserva.
    - Depois {T6, T7}, T4 e T12.

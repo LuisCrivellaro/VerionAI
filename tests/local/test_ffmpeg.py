@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -165,3 +166,127 @@ def test_run_never_inherits_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ff.subprocess, "run", fake_run)
     ff.run(["-version"])
     assert seen.get("stdin") is subprocess.DEVNULL
+
+
+# --- run_rawvideo: quadros por pipe, com ffmpeg falso no PATH -------------------------------------------------
+
+_BIG_FRAME = b"\x00" * (1 << 20)  # 1 MiB: bem acima do buffer de 64 KiB do pipe, então a escrita bloqueia se ninguém ler
+_RAW_ARGS = ["-f", "rawvideo", "-i", "pipe:0", "out.mp4"]
+
+
+def _fake_ffmpeg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
+    """Instala um ``ffmpeg`` falso (script sh) à frente do PATH. ``body`` roda com ``$PIDFILE`` e ``$ARGSFILE``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "ffmpeg"
+    script.write_text(f'#!/bin/sh\nPIDFILE="{tmp_path}/pid"\nARGSFILE="{tmp_path}/args"\n{body}\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    return bin_dir
+
+
+def _alive(pid: int) -> bool:
+    """Processo vivo (zumbi não conta: já morreu, só falta ser colhido)."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return state != "Z"
+
+
+def _assert_no_orphan(tmp_path: Path) -> None:
+    pid = int((tmp_path / "pid").read_text())
+    deadline = time.monotonic() + 3.0
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(pid), f"processo órfão {pid} continua vivo"
+
+
+def test_run_rawvideo_feeds_frames_and_prefixes_the_standard_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_ffmpeg(tmp_path, monkeypatch, 'echo "$@" > "$ARGSFILE"; cat > "$ARGSFILE.in"')
+    ffmpeg.run_rawvideo([b"abc", memoryview(b"def")], _RAW_ARGS, timeout_s=10)
+    assert (tmp_path / "args").read_text().split()[:5] == ["-y", "-hide_banner", "-loglevel", "error", "-f"]
+    assert (tmp_path / "args.in").read_bytes() == b"abcdef"
+
+
+def test_run_rawvideo_nonzero_exit_is_ffmpeg_error_with_stderr_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_ffmpeg(tmp_path, monkeypatch, 'echo $$ > "$PIDFILE"; echo "codec explodiu" >&2; exit 3')
+    with pytest.raises(FfmpegError, match="código 3: codec explodiu") as info:
+        ffmpeg.run_rawvideo([_BIG_FRAME] * 4, _RAW_ARGS, timeout_s=10)  # ffmpeg sai antes de ler: BrokenPipe interno
+    assert "codec explodiu" in info.value.stderr
+
+
+def test_run_rawvideo_missing_binary_is_ffmpeg_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    empty = tmp_path / "vazio"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    with pytest.raises(FfmpegError, match="não encontrado"):
+        ffmpeg.run_rawvideo([b"x"], _RAW_ARGS, timeout_s=10)
+
+
+def test_run_rawvideo_ffmpeg_that_stops_reading_times_out_instead_of_hanging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O bug reproduzido na revisão: o ffmpeg para de ler, a escrita bloqueia e nada mais acontece."""
+    _fake_ffmpeg(tmp_path, monkeypatch, 'sleep 1000 & echo $! > "$PIDFILE"; echo "travado" >&2; wait')
+    start = time.monotonic()
+    with pytest.raises(FfmpegError, match="tempo limite de 0.5 s: travado"):
+        ffmpeg.run_rawvideo([_BIG_FRAME] * 64, _RAW_ARGS, timeout_s=0.5)
+    assert time.monotonic() - start < 5.0
+    _assert_no_orphan(tmp_path)
+
+
+def test_run_rawvideo_ffmpeg_that_never_finishes_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lê tudo, mas não termina depois de fechar o stdin (nem o ``wait`` pode travar)."""
+    _fake_ffmpeg(tmp_path, monkeypatch, 'cat > /dev/null; sleep 1000 & echo $! > "$PIDFILE"; wait')
+    start = time.monotonic()
+    with pytest.raises(FfmpegError, match="tempo limite"):
+        ffmpeg.run_rawvideo([b"pouco"], _RAW_ARGS, timeout_s=0.5)
+    assert time.monotonic() - start < 5.0
+    _assert_no_orphan(tmp_path)
+
+
+def test_run_rawvideo_slow_frame_source_also_counts_against_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_ffmpeg(tmp_path, monkeypatch, 'sleep 1000 & echo $! > "$PIDFILE"; cat > /dev/null; wait')
+
+    def slow() -> Any:
+        yield b"a"
+        time.sleep(0.9)  # o gerador demora mais que o prazo
+        yield b"b"
+
+    start = time.monotonic()
+    with pytest.raises(FfmpegError, match="tempo limite"):
+        ffmpeg.run_rawvideo(slow(), _RAW_ARGS, timeout_s=0.5)
+    assert time.monotonic() - start < 6.0
+    _assert_no_orphan(tmp_path)
+
+
+def test_run_rawvideo_frame_source_error_propagates_and_kills_ffmpeg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_ffmpeg(tmp_path, monkeypatch, 'sleep 1000 & echo $! > "$PIDFILE"; cat > /dev/null; wait')
+
+    def broken() -> Any:
+        yield b"a"
+        deadline = time.monotonic() + 3.0
+        while not (tmp_path / "pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)  # espera o script falso gravar o pid do filho, para checar que ele morre
+        raise RuntimeError("render falhou")
+
+    with pytest.raises(RuntimeError, match="render falhou"):
+        ffmpeg.run_rawvideo(broken(), _RAW_ARGS, timeout_s=30)
+    _assert_no_orphan(tmp_path)
+
+
+def test_run_rawvideo_works_with_the_real_ffmpeg(tmp_path: Path) -> None:
+    out = tmp_path / "raw.mp4"
+    frames = [bytes([i * 40]) * (64 * 48 * 3) for i in range(5)]
+    ffmpeg.run_rawvideo(
+        frames,
+        ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "64x48", "-r", "30", "-i", "pipe:0",
+         "-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "ultrafast", str(out)],
+        timeout_s=60,
+    )  # fmt: skip
+    assert ffmpeg.probe(out).width == 64

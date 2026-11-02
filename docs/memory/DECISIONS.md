@@ -1,5 +1,21 @@
 # Decisões (a mais recente no topo)
 
+## 2026-11-02 · ADR-008 · Parallax por warp contínuo, encoder com prazo e QC com último quadro
+- **Parallax 2,5D:**
+  - É um backward warp contínuo por pixel, não "por camada" como dizia a spec. Assim não há buracos nem fantasmas.
+  - Amplitude de 1,5% da largura (o teto é 2%), zoom de segurança de até ~1,03 e profundidade suavizada (3 passadas, ~27 px).
+  - A não-dobra é garantida por teste em 1920x1080 e por uma asserção analítica.
+- **Mapa de profundidade:**
+  - Convenção de nome `<foto.jpg>.depth.png`: PNG 16 bits, branco = perto, na orientação já corrigida pelo EXIF.
+  - Mapa plano gera `InputError`.
+- **Encoder de quadros:** `ffmpeg.run_rawvideo` centraliza a execução com prazo real (POSIX: `killpg`). Nenhum subprocesso do ffmpeg roda fora de `local/ffmpeg.py`, exceto `fc-match` na escolha de fonte.
+- **QC:** `extract` devolve `QcFrames(frames, sheet, last)`. O último quadro é obrigatório, porque é onde o parallax desloca mais. A folha de contato usa 4 colunas e linhas variáveis; a skill foi atualizada.
+- **Montagem:**
+  - Cada clipe precisa de pelo menos 2×`transition_s` (regra conservadora).
+  - `short_clips` usa índice base 0 da lista recebida, não número de cena.
+  - A marca DEMONSTRAÇÃO exige a fonte Inter.
+- **Pendente:** verificar a licença comercial do modelo de profundidade real (o proxy bloqueia o Hugging Face). Até lá, só `DepthFromFile`.
+
 ## 2026-11-02 · ADR-007 · Harness relança erros; run travado ao roteiro; enquadramento 16:9
 - **Erros relançados:** `run_scenes` relança toda exceção depois de liquidar com a reserva (spec 3.5).
   - A exceção leva `verion_run_id` e a nota `run_id=N`.

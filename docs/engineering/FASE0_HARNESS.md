@@ -179,13 +179,13 @@ def is_delivery_format(p: Probe) -> bool: ...  # h264, 1920x1080, yuv420p, 30/1
 class DepthEstimator(Protocol):
     def depth(self, photo: Path) -> Path: ...  # PNG 16 bits em cinza, mesma resolução da foto
 class DepthFromFile: ...                       # lê <foto>.depth.png; DepthMissing se ausente
-# local/parallax.py: ParallaxAdapter (deslocamento por camada; amplitude ≤ 2% da largura; client = DepthEstimator)
+# local/parallax.py: ParallaxAdapter (warp contínuo por pixel, ADR-008; amplitude ≤ 2% da largura; client = DepthEstimator)
 # local/assembly.py: R2 com corte no alvo + R3 (+ R5 se demo)
 class ClipSpec: path: Path; target_s: float
 class AssemblyResult: out: Path; duration_s: float; short_clips: tuple[int, ...]  # clipes mais curtos que o alvo
 def assemble(clips: Sequence[ClipSpec], out: Path, *, transition_s: float = 0.5, demo: bool = False) -> AssemblyResult: ...
 # local/qc_frames.py: R6
-def extract(clip: Path, out_dir: Path) -> tuple[list[Path], Path]: ...  # (quadros a 1/s, folha de contato)
+def extract(clip: Path, out_dir: Path) -> QcFrames: ...  # QcFrames(frames a 1/s, sheet, last) — ADR-008
 ```
 
 `assemble` corta cada clipe em `target_s` (com `-t` na R2) e nunca estica clipe curto: usa-o inteiro e o lista em

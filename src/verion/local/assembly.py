@@ -65,7 +65,9 @@ class ClipSpec:
 class AssemblyResult:
     out: Path
     duration_s: float
-    short_clips: tuple[int, ...]  # índices (base 0, na lista recebida) dos clipes mais curtos que o alvo
+    # Índices BASE 0 na lista ``clips`` recebida (NÃO o número da cena, que começa em 1): quem chama mapeia para a
+    # cena. São os clipes mais curtos que o alvo, usados inteiros e sem esticar.
+    short_clips: tuple[int, ...]
 
 
 def assemble(
@@ -75,10 +77,19 @@ def assemble(
     transition_s: float = 0.5,
     demo: bool = False,
 ) -> AssemblyResult:
-    """Monta ``clips`` em ``out`` (H.264 1920x1080 yuv420p 30 fps). Ver o docstring do módulo."""
+    """Monta ``clips`` em ``out`` (H.264 1920x1080 yuv420p 30 fps). Ver o docstring do módulo.
+
+    ``AssemblyResult.short_clips`` traz índices base 0 da lista ``clips`` (não números de cena).
+
+    Regra intencional e conservadora: com 2+ clipes, cada um, já cortado no alvo, precisa durar ao menos
+    ``2 * transition_s`` (uma transição na entrada e outra na saída sem se sobreporem). Nas pontas bastaria
+    ``transition_s``, mas cenas reais têm 3 a 10 s e o limite simples evita offsets inválidos. A checagem roda
+    com as durações de origem, antes de codificar qualquer coisa; erro: ``InputError``.
+    """
     specs = list(clips)
     _validate(specs, out, transition_s)
     source_durations = [ffmpeg.probe(Path(c.path)).duration_s for c in specs]
+    _check_transition_fits([min(d, c.target_s) for c, d in zip(specs, source_durations, strict=True)], transition_s)
     short = tuple(i for i, (c, d) in enumerate(zip(specs, source_durations, strict=True)) if d < c.target_s - _FRAME_S)
     font = demo_font() if demo else None
 
@@ -168,10 +179,17 @@ def build_filter_complex(durations: Sequence[float], transition_s: float, *, fon
 
 
 def demo_font() -> str:
-    """Caminho da fonte da R5 (``fc-match``). ``FfmpegError`` se ele não existir no disco."""
+    """Caminho da fonte Inter da R5 (``fc-match``). ``FfmpegError`` se não existir ou se NÃO for a Inter.
+
+    O ``fc-match`` devolve outra fonte em silêncio quando a pedida falta. Recusamos o fallback (em vez de aceitar
+    e registrar) porque a marca é parte da identidade do vídeo e uma fonte qualquer pode não ter ``Ç``/``Ã``:
+    melhor falhar com a instrução de instalar a Inter do que entregar uma demo com glifos errados.
+    """
     path = _fc_match()
     if not path or not Path(path).is_file():
         raise FfmpegError(f"fonte da marca d'água não encontrada ({_FONT_PATTERN} -> {path!r}); instale a fonte Inter")
+    if "inter" not in Path(path).name.lower():
+        raise FfmpegError(f"o fc-match devolveu uma fonte de fallback ({path}) em vez da Inter; instale a fonte Inter")
     return path
 
 

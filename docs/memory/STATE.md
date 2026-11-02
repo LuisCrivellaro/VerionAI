@@ -15,7 +15,8 @@ Atualizado: 2026-11-02
 - [x] **T1 concluída e aprovada** (evidências 06 e 07): config, errors, ledger SQLite e trava de gasto (`SpendToken`, reserva `pending` em `BEGIN IMMEDIATE`, triggers, AST). **219 testes verdes**, ruff limpo. ADR-006.
 - [x] **T2 concluída e aprovada** (evidências 08 e 09): contrato dos adaptadores, registry, helper de contrato endurecido e `fake`. **344 testes verdes**.
 - [x] **T3 (roteiro + harness) e T5 (ffmpeg + Ken Burns) concluídas e aprovadas** (evidência 10, ADR-007). **544 testes verdes**.
-- [ ] **PRÓXIMO PASSO: {T6, T7} (dependem de T5) e {T8, T9}**, depois T4 e T12. Pendências: evidência 10 (T4: runs vazios, `exc.verion_run_id`; T6/T7: teste EXIF/retrato); evidência 09 (T8/T9: falhas transient/pós-aceite, `max_client_calls`); mypy em `ledger/repo.py:349`.
+- [x] **T6 (parallax 2,5D) e T7 (montagem + QC) concluídas e aprovadas** (evidência 11, ADR-008). **655 testes verdes** (~90 s).
+- [ ] **PRÓXIMO PASSO: {T8 (Veo), T9 (Gemini Omni)}** com mocks, sem chamada paga; depois T4 (CLI) e T12 (aceitação). Pendências: evidência 09 (T8/T9: falhas transient/pós-aceite, `max_client_calls` exato, construtor não lê o client); evidência 10 (T4: runs vazios, `exc.verion_run_id`, exit codes); `short_clips` base 0; `extract` → `QcFrames`; mypy em `ledger/repo.py:349`; suíte < 120 s.
 - [ ] Depois: {T3, T5, T8, T9} → {T6, T7} → T4 → T12. T10/T11 bloqueadas por decisão do usuário.
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 

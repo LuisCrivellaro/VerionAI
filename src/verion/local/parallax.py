@@ -44,10 +44,7 @@ from __future__ import annotations
 
 import math
 import os
-import subprocess
 import sys
-import tempfile
-import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Final, cast
@@ -261,22 +258,33 @@ def _canvas(photo: Image.Image) -> np.ndarray:
     return rgba.view(np.uint32).reshape(-1)
 
 
+_DEPTH_16BIT_MODES: Final = frozenset({"I;16", "I;16L", "I;16B", "I;16N"})
+
+
+def _depth_values(img: Image.Image, label: object) -> np.ndarray:
+    """Valores de 16 bits do mapa como ``float32``. Aceita ``I;16*`` (Pillow recente) e ``I`` com valores em
+    0..65535 (como versões antigas do Pillow abrem o PNG de 16 bits em cinza). Outros modos: ``InputError``."""
+    if img.mode in _DEPTH_16BIT_MODES:
+        return np.asarray(img, dtype=np.float32)
+    if img.mode == "I":
+        values = np.asarray(img)
+        if int(values.min()) < 0 or int(values.max()) > 65535:
+            raise InputError(f"mapa de profundidade em modo I fora de 0..65535 (não é PNG de 16 bits): {label}")
+        return values.astype(np.float32)
+    raise InputError(f"mapa de profundidade deve ser PNG de 16 bits em cinza (modo I;16 ou I), veio {img.mode!r}: {label}")
+
+
 def _read_depth(path: Path, expected_size: tuple[int, int]) -> np.ndarray:
     """Mapa ``float64`` na resolução de saída, com o mesmo enquadramento da foto. ``InputError`` se violar o contrato."""
     try:
         with Image.open(path) as img:
             img.load()
-            mode, size = img.mode, img.size
-            if mode != "I;16":
+            if img.size != expected_size:
                 raise InputError(
-                    f"mapa de profundidade deve ser PNG de 16 bits em cinza (modo I;16), veio {mode!r}: {path}"
-                )
-            if size != expected_size:
-                raise InputError(
-                    f"mapa de profundidade {size[0]}x{size[1]} difere da foto orientada "
+                    f"mapa de profundidade {img.size[0]}x{img.size[1]} difere da foto orientada "
                     f"{expected_size[0]}x{expected_size[1]} (a orientação EXIF já aplicada): {path}"
                 )
-            raw = np.asarray(img, dtype=np.float32)
+            raw = _depth_values(img, path)
     except (OSError, ValueError, Image.DecompressionBombError) as exc:
         raise InputError(f"mapa de profundidade ilegível: {path} ({exc})") from exc
     fitted = ImageOps.fit(Image.fromarray(raw), (_OUT_W, _OUT_H), Image.Resampling.BICUBIC, centering=(0.5, 0.5))
@@ -285,8 +293,7 @@ def _read_depth(path: Path, expected_size: tuple[int, int]) -> np.ndarray:
 
 def _encode(frames: Iterable[np.ndarray], count: int, part: Path, *, timeout_s: float = _ENCODE_TIMEOUT_S) -> None:
     """Envia ``count`` quadros RGBA (``uint32``) ao ffmpeg por pipe e grava ``part`` (receita da skill, ``-crf 20``)."""
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+    args = [
         "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{_OUT_W}x{_OUT_H}", "-r", str(_FPS), "-i", "pipe:0",
         "-vf", "format=yuv420p",
         "-frames:v", str(count),
@@ -294,35 +301,7 @@ def _encode(frames: Iterable[np.ndarray], count: int, part: Path, *, timeout_s: 
         "-movflags", "+faststart",
         "-an", str(part),
     ]  # fmt: skip
-    deadline = time.monotonic() + timeout_s
-    with tempfile.TemporaryFile() as err:
-        try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err)
-        except FileNotFoundError as exc:
-            raise FfmpegError("ffmpeg não encontrado no PATH; instale o ffmpeg", stderr=str(exc)) from exc
-        assert proc.stdin is not None
-        try:
-            try:
-                for frame in frames:
-                    if time.monotonic() > deadline:
-                        raise FfmpegError(f"parallax excedeu o tempo limite de {timeout_s:g} s")
-                    proc.stdin.write(memoryview(np.ascontiguousarray(frame)).cast("B"))
-            except BrokenPipeError:
-                pass  # o ffmpeg encerrou antes: o stderr abaixo explica
-            finally:
-                try:
-                    proc.stdin.close()
-                except BrokenPipeError:
-                    pass
-            code = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
-        except BaseException:
-            proc.kill()
-            proc.wait()
-            raise
-        err.seek(0)
-        stderr = err.read().decode("utf-8", "replace")
-    if code != 0:
-        raise FfmpegError(f"ffmpeg terminou com código {code}: {stderr[-2000:].strip()}", stderr=stderr)
+    ffmpeg.run_rawvideo((np.ascontiguousarray(f) for f in frames), args, timeout_s=timeout_s)
 
 
 class ParallaxAdapter:

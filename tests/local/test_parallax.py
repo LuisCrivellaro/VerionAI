@@ -257,6 +257,42 @@ def test_warp_never_folds(camera: str, prepared_maps: dict[str, np.ndarray]) -> 
             assert float(np.diff(ys, axis=0).min()) > 0.0, (camera, name, p, "y")
 
 
+def full_res_hard_maps() -> dict[str, np.ndarray]:
+    """Xadrez de 40 px e degrau, em 1920x1080 (a resolução real), já preparados por ``prepare_depth``."""
+    checker = (np.indices((H, W)).sum(axis=0) // 40 % 2).astype(np.float64)
+    step = np.zeros((H, W))
+    step[:, W // 2 :] = 1.0
+    return {"checker-40px": parallax.prepare_depth(checker * 65535.0), "step": parallax.prepare_depth(step * 65535.0)}
+
+
+@pytest.fixture(scope="module")
+def full_res_maps() -> dict[str, np.ndarray]:
+    return full_res_hard_maps()
+
+
+def test_blur_width_bound_holds_analytically_at_1920() -> None:
+    """Inclinação máxima da profundidade suavizada (3/(4w) por pixel) x amplitude < 0,8, em 1920 de largura.
+
+    Em 192x108 o arredondamento de ``blur_width`` esconde um filtro pela metade; em 1920 a conta é justa.
+    """
+    amplitude = parallax.SHIFT_FRAC * W
+    assert amplitude * 3 / (4 * parallax.blur_width(amplitude)) < 0.8
+
+
+@pytest.mark.parametrize("camera", ["pan-right", "pan-left", "push-in", "pull-out"])
+def test_warp_never_folds_at_full_resolution(camera: str, full_res_maps: dict[str, np.ndarray]) -> None:
+    """Em 1920x1080, com xadrez de 40 px e degrau: dxs/dx > 0, dys/dy > 0 e det(J) > 0 (nada espelhado)."""
+    for name, d in full_res_maps.items():
+        for p in (0.0, 0.5, 1.0):
+            xs, ys = parallax.source_coords(camera, d, p)  # type: ignore[arg-type]
+            xs_x, xs_y = np.diff(xs, axis=1)[:-1], np.diff(xs, axis=0)[:, :-1]
+            ys_x, ys_y = np.diff(ys, axis=1)[:-1], np.diff(ys, axis=0)[:, :-1]
+            assert float(xs_x.min()) > 0.0, (camera, name, p, "dxs/dx")
+            assert float(ys_y.min()) > 0.0, (camera, name, p, "dys/dy")
+            det = xs_x * ys_y - xs_y * ys_x
+            assert float(det.min()) > 0.0, (camera, name, p, "det(J)", float(det.min()))
+
+
 @pytest.mark.parametrize("camera", CAMERAS)
 def test_shift_between_nearest_and_farthest_layer_is_at_most_2_percent_of_width(camera: str) -> None:
     """Amplitude: deslocamento relativo entre a camada mais próxima e a mais distante <= 2% da largura."""
@@ -447,6 +483,27 @@ def test_depth_must_be_16_bit_gray_png(conn: sqlite3.Connection, prices: PriceTa
         generate(conn, prices, make_scene(photo), tmp_path / "o.mp4")
 
 
+def test_depth_values_accept_16_bit_modes_and_mode_i_in_range() -> None:
+    """Pillow recente abre o PNG de 16 bits como ``I;16``; versões antigas, como ``I``. Os dois valem."""
+    ramp = np.linspace(0, 65535, 12).reshape(3, 4)
+    as_16 = Image.fromarray(ramp.astype(np.uint16))
+    as_i = Image.fromarray(ramp.astype(np.int32))
+    assert as_16.mode == "I;16" and as_i.mode == "I"
+    assert np.array_equal(parallax._depth_values(as_16, "x"), parallax._depth_values(as_i, "x"))
+    assert float(parallax._depth_values(as_i, "x").max()) == 65535.0
+
+
+def test_depth_values_reject_mode_i_out_of_16_bit_range_and_other_modes() -> None:
+    too_big = Image.fromarray(np.full((3, 4), 70000, np.int32))
+    negative = Image.fromarray(np.full((3, 4), -5, np.int32))
+    for img in (too_big, negative):
+        with pytest.raises(InputError, match="0..65535"):
+            parallax._depth_values(img, "x")
+    for img in (Image.new("L", (4, 3)), Image.new("RGB", (4, 3)), Image.new("F", (4, 3))):
+        with pytest.raises(InputError, match="16 bits"):
+            parallax._depth_values(img, "x")
+
+
 def test_depth_with_other_resolution_is_input_error(
     conn: sqlite3.Connection, prices: PriceTable, tmp_path: Path
 ) -> None:
@@ -500,6 +557,25 @@ def test_encoder_failure_propagates_and_leaves_no_partial_file(
     assert not out.exists() and list(out.parent.iterdir()) == []
 
 
+def test_ffmpeg_exit_error_through_the_real_encoder_path_leaves_nothing(
+    conn: sqlite3.Connection, prices: PriceTable, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Um ``ffmpeg`` falso que sai com erro vira FfmpegError (código 6) e não deixa arquivo parcial."""
+    photo = tiny_photo(tmp_path)
+    write_depth(photo)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "ffmpeg"
+    fake.write_text('#!/bin/sh\necho "encoder quebrou" >&2\nexit 7\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    out = tmp_path / "out" / "s01.mp4"
+    with pytest.raises(FfmpegError, match="código 7: encoder quebrou") as info:
+        generate(conn, prices, make_scene(photo, duration_s=0.2), out)
+    assert info.value.exit_code == 6
+    assert not out.exists() and list(out.parent.iterdir()) == []
+
+
 def test_encoder_receives_one_frame_per_output_frame(
     conn: sqlite3.Connection, prices: PriceTable, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -514,8 +590,8 @@ def test_encoder_receives_one_frame_per_output_frame(
 
     monkeypatch.setattr(parallax, "_encode", spy_encoder)
     with pytest.raises(FfmpegError):
-        generate(conn, prices, make_scene(photo, duration_s=0.5), tmp_path / "o.mp4")
-    assert seen == {"count": 15, "n": 15, "shape": (H, W), "dtype": np.dtype(np.uint32)}
+        generate(conn, prices, make_scene(photo, duration_s=0.2), tmp_path / "o.mp4")
+    assert seen == {"count": 6, "n": 6, "shape": (H, W), "dtype": np.dtype(np.uint32)}
 
 
 # --- ffmpeg real: formato de entrega, fidelidade, orientação e contrato ----------------------------
@@ -530,25 +606,25 @@ class Rendered:
 
 @pytest.fixture(scope="module")
 def rendered(synthetic_photo: Path, tmp_path_factory: pytest.TempPathFactory, prices_mod: PriceTable) -> Rendered:
-    """Uma renderização de 2 s (60 quadros; mantém a suíte rápida) com profundidade em gradiente, via DepthFromFile."""
+    """Uma renderização de 1 s (30 quadros; mantém a suíte rápida) com profundidade em gradiente, via DepthFromFile."""
     work = tmp_path_factory.mktemp("parallax")
     photo = work / "sala.jpg"
     shutil.copy(synthetic_photo, photo)  # o mapa fica ao lado da cópia, sem sujar a foto compartilhada
     write_depth(photo)
     connection = repo.connect(work / "verion.db")
     try:
-        result = generate(connection, prices_mod, make_scene(photo, "pan-right", 2.0), work / "s01.mp4", DepthFromFile())
+        result = generate(connection, prices_mod, make_scene(photo, "pan-right", 1.0), work / "s01.mp4", DepthFromFile())
     finally:
         connection.close()
     return Rendered(photo, result, work)
 
 
 def test_delivery_format_and_duration(rendered: Rendered) -> None:
-    """Critério de pronto: h264, 1920x1080, yuv420p, 30/1 (ffprobe) e 2,0 +- 0,05 s."""
+    """Critério de pronto: h264, 1920x1080, yuv420p, 30/1 (ffprobe) e 1,0 +- 0,05 s."""
     p = ffmpeg.probe(rendered.result.clip_path)
     assert (p.codec, p.width, p.height, p.pix_fmt, p.fps) == ("h264", 1920, 1080, "yuv420p", "30/1")
     assert ffmpeg.is_delivery_format(p)
-    assert p.duration_s == pytest.approx(2.0, abs=0.05)
+    assert p.duration_s == pytest.approx(1.0, abs=0.05)
 
 
 def test_result_describes_the_real_file(rendered: Rendered) -> None:
@@ -557,7 +633,7 @@ def test_result_describes_the_real_file(rendered: Rendered) -> None:
     assert (r.width, r.height) == (1920, 1080) and r.fps == pytest.approx(30.0)
     assert r.duration_s == pytest.approx(p.duration_s)
     assert (r.units, r.unit_kind, r.cost_is_estimate, r.provider_job_id) == (0.0, "none", False, None)
-    assert r.meta["camera"] == "pan-right" and r.meta["frames"] == "60"
+    assert r.meta["camera"] == "pan-right" and r.meta["frames"] == "30"
     assert float(r.meta["shift_px"]) <= 0.02 * 1920
     assert list(r.clip_path.parent.glob(".*part*")) == [], "arquivo parcial não pode sobrar"
 
@@ -602,7 +678,7 @@ def test_portrait_and_exif_orientation_are_respected(
     photo = make_halves_jpeg(tmp_path / f"{label}.jpg", stored, split, orientation)
     assert oriented_size(photo) == (900, 1600)
     write_depth(photo)
-    result = generate(conn, prices, make_scene(photo, "push-in", 0.5), tmp_path / f"{label}.mp4")
+    result = generate(conn, prices, make_scene(photo, "push-in", 0.2), tmp_path / f"{label}.mp4")
     assert ffmpeg.is_delivery_format(ffmpeg.probe(result.clip_path))
     assert ssim_first_frame(result.clip_path, photo, tmp_path) >= 0.95
     for which in ("first", "last"):
@@ -621,19 +697,16 @@ def test_exif_photo_with_depth_in_stored_orientation_is_refused(
         generate(conn, prices, make_scene(photo), tmp_path / "o.mp4")
 
 
-def test_adapter_contract_with_depth_from_file(
-    conn: sqlite3.Connection, prices: PriceTable, synthetic_photo: Path, tmp_path: Path
-) -> None:
-    """Contrato da spec 3.4 com o estimador real (DepthFromFile) e profundidade sintética; cena curta (0,5 s)."""
-    photo = tmp_path / "contrato.jpg"
-    shutil.copy(synthetic_photo, photo)
+def test_adapter_contract_with_depth_from_file(conn: sqlite3.Connection, prices: PriceTable, tmp_path: Path) -> None:
+    """Contrato da spec 3.4 com o estimador real (DepthFromFile) e profundidade sintética; cena curta (0,2 s, 6 quadros)."""
+    photo = tiny_photo(tmp_path, "contrato.jpg", (1200, 900))  # foto menor: carregar 12 MP não acrescenta garantia
     write_depth(photo)
     factory: Callable[[object | None], ParallaxAdapter] = lambda client: ParallaxAdapter(prices, client)
     assert_generator_contract(
         factory,
         conn=conn,
         prices=prices,
-        scene=make_scene(photo, "push-in", 0.5),
+        scene=make_scene(photo, "push-in", 0.2),
         good_client=DepthFromFile(),
         out_dir=tmp_path,
     )

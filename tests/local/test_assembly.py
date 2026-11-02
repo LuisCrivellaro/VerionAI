@@ -22,7 +22,7 @@ TRANSITION_S = 0.5
 FRAME_TOLERANCE_S = 0.1
 
 
-def make_clip(path: Path, *, seconds: float, size: str = "320x180", fps: int = 30, pix_fmt: str = "yuv420p") -> Path:
+def make_clip(path: Path, *, seconds: float, size: str = "160x90", fps: int = 30, pix_fmt: str = "yuv420p") -> Path:
     """Clipe sintético H.264 de ``seconds`` s; a cor de ``testsrc`` muda com o tempo."""
     proc = subprocess.run(
         [
@@ -59,11 +59,11 @@ def clips(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     """8 s 16:9, 5 s em 4:3 e 5 s em retrato (resoluções e proporções diferentes), mais um de 3 s."""
     d = tmp_path_factory.mktemp("clipes")
     return {
-        "c8": make_clip(d / "c8.mp4", seconds=8, size="640x360"),
-        "c5": make_clip(d / "c5.mp4", seconds=5, size="320x240"),
-        "c5p": make_clip(d / "c5p.mp4", seconds=5, size="180x320", fps=25),
-        "c3": make_clip(d / "c3.mp4", seconds=3, size="320x180"),
-        "c1": make_clip(d / "c1.mp4", seconds=1.2, size="320x180"),
+        "c8": make_clip(d / "c8.mp4", seconds=8, size="320x180"),
+        "c5": make_clip(d / "c5.mp4", seconds=5, size="160x120"),
+        "c5p": make_clip(d / "c5p.mp4", seconds=5, size="90x160", fps=25),
+        "c3": make_clip(d / "c3.mp4", seconds=3, size="160x90"),
+        "c1": make_clip(d / "c1.mp4", seconds=1.2, size="160x90"),
     }
 
 
@@ -86,42 +86,31 @@ class TestCriteriaOfDone:
         assert result.out == out
         assert result.short_clips == ()
 
-    def test_3s_clip_with_5s_target_is_listed_and_not_stretched(self, clips: dict[str, Path], tmp_path: Path) -> None:
-        out = tmp_path / "curto.mp4"
-        result = assembly.assemble([ClipSpec(clips["c3"], 5.0)], out)
-        assert result.short_clips == (0,)
-        info = ffmpeg.probe(out)
-        assert ffmpeg.is_delivery_format(info)
-        assert info.duration_s == pytest.approx(3.0, abs=FRAME_TOLERANCE_S)  # 3 s, não 5 s
-
-    def test_short_clip_in_the_middle_of_a_montage_uses_its_index(self, clips: dict[str, Path], tmp_path: Path) -> None:
+    def test_3s_clip_with_5s_target_is_listed_not_stretched_and_long_clips_are_cut(
+        self, clips: dict[str, Path], tmp_path: Path
+    ) -> None:
         out = tmp_path / "meio.mp4"
-        specs = [ClipSpec(clips["c5"], 1.0), ClipSpec(clips["c1"], 3.0), ClipSpec(clips["c8"], 1.0)]
+        # c5 (5 s) cortado em 1 s; c3 (3 s) com alvo de 5 s fica inteiro; c8 (8 s) cortado em 1 s
+        specs = [ClipSpec(clips["c5"], 1.0), ClipSpec(clips["c3"], 5.0), ClipSpec(clips["c8"], 1.0)]
         result = assembly.assemble(specs, out, transition_s=0.25)
-        assert result.short_clips == (1,)  # índice 0-based na lista recebida
-        # 1,0 + 1,2 (inteiro, não os 3 do alvo) + 1,0 - 2 * 0,25
-        assert result.duration_s == pytest.approx(2.7, abs=FRAME_TOLERANCE_S)
-
-    def test_single_long_clip_is_cut_at_target(self, clips: dict[str, Path], tmp_path: Path) -> None:
-        out = tmp_path / "um.mp4"
-        result = assembly.assemble([ClipSpec(clips["c8"], 2.0)], out)  # 8 s de origem
-        assert result.short_clips == ()
+        assert result.short_clips == (1,)  # índice 0-based na lista recebida, não número de cena
         info = ffmpeg.probe(out)
         assert ffmpeg.is_delivery_format(info)
-        assert info.duration_s == pytest.approx(2.0, abs=FRAME_TOLERANCE_S)
+        # 1 + 3 (inteiro, não os 5 do alvo) + 1 - 2 * 0,25; sem corte seriam 5 + 3 + 8 - 0,5
+        assert info.duration_s == pytest.approx(4.5, abs=FRAME_TOLERANCE_S)
 
     def test_demo_changes_the_frame_but_not_the_timing(self, clips: dict[str, Path], tmp_path: Path) -> None:
-        specs = [ClipSpec(clips["c5"], 1.0), ClipSpec(clips["c3"], 1.0)]
+        specs = [ClipSpec(clips["c5"], 0.6), ClipSpec(clips["c3"], 0.6)]
         plain = tmp_path / "sem.mp4"
         demo = tmp_path / "demo.mp4"
-        r_plain = assembly.assemble(specs, plain, transition_s=0.25)
-        r_demo = assembly.assemble(specs, demo, transition_s=0.25, demo=True)
+        r_plain = assembly.assemble(specs, plain, transition_s=0.2)
+        r_demo = assembly.assemble(specs, demo, transition_s=0.2, demo=True)
 
         assert ffmpeg.is_delivery_format(ffmpeg.probe(demo))  # drawtext não pode deixar yuv444p
         assert r_demo.duration_s == pytest.approx(r_plain.duration_s, abs=0.05)
 
-        a = frame_at(plain, 0.4, tmp_path / "a.png")
-        b = frame_at(demo, 0.4, tmp_path / "b.png")
+        a = frame_at(plain, 0.2, tmp_path / "a.png")
+        b = frame_at(demo, 0.2, tmp_path / "b.png")
         assert a.shape == b.shape == (1080, 1920, 3)
         h, w = a.shape[:2]
         center = (slice(h // 2 - 60, h // 2 + 60), slice(w // 2 - 450, w // 2 + 450))
@@ -133,12 +122,13 @@ class TestCriteriaOfDone:
 
 
 class TestNormalization:
-    def test_portrait_clip_is_letterboxed_not_distorted(self, clips: dict[str, Path], tmp_path: Path) -> None:
-        out = tmp_path / "retrato.mp4"
-        assembly.assemble([ClipSpec(clips["c5p"], 1.0)], out)
-        frame = frame_at(out, 0.5, tmp_path / "f.png")
+    def test_portrait_clip_is_letterboxed_not_distorted(
+        self, three: tuple[AssemblyResult, Path], tmp_path: Path
+    ) -> None:
+        _, out = three
+        frame = frame_at(out, 12.0, tmp_path / "f.png")  # o 3º clipe (retrato) está inteiro a partir de 9,5 s
         w = frame.shape[1]
-        # 180x320 em 1920x1080 ocupa 607 px de largura no centro; as laterais são barras pretas.
+        # 90x160 em 1920x1080 ocupa 607 px de largura no centro; as laterais são barras pretas.
         assert frame[:, :400].max() <= 20
         assert frame[:, w - 400 :].max() <= 20
         assert frame[:, w // 2 - 250 : w // 2 + 250].max() > 100
@@ -199,6 +189,17 @@ class TestFilterGraph:
         with pytest.raises(FfmpegError, match="fonte"):
             assembly.demo_font()
 
+    def test_demo_font_refuses_a_silent_fallback_font(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        fallback = tmp_path / "DejaVuSans.ttf"  # o fc-match devolve outra fonte quando a Inter falta
+        fallback.write_bytes(b"x")
+        monkeypatch.setattr(assembly, "_fc_match", lambda: str(fallback))
+        with pytest.raises(FfmpegError, match="Inter"):
+            assembly.demo_font()
+        inter = tmp_path / "Inter-Regular.otf"
+        inter.write_bytes(b"x")
+        monkeypatch.setattr(assembly, "_fc_match", lambda: str(inter))
+        assert assembly.demo_font() == str(inter)
+
 
 class TestInputValidation:
     def test_empty_list(self, tmp_path: Path) -> None:
@@ -224,6 +225,17 @@ class TestInputValidation:
         specs = [ClipSpec(clips["c3"], 0.8), ClipSpec(clips["c3"], 3.0)]
         with pytest.raises(InputError, match="transição"):
             assembly.assemble(specs, tmp_path / "x.mp4")
+
+    def test_too_short_clip_is_refused_before_any_encoding(
+        self, clips: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(*_a: object, **_k: object) -> None:
+            raise AssertionError("não deveria normalizar antes de validar as durações de origem")
+
+        monkeypatch.setattr(assembly, "_normalize", boom)
+        specs = [ClipSpec(clips["c5"], 5.0), ClipSpec(clips["c1"], 5.0)]  # c1 tem 1,2 s < 2 * 0,7
+        with pytest.raises(InputError, match="transição"):
+            assembly.assemble(specs, tmp_path / "x.mp4", transition_s=0.7)
 
     def test_output_cannot_be_an_input(self, clips: dict[str, Path], tmp_path: Path) -> None:
         with pytest.raises(InputError, match="entrada"):

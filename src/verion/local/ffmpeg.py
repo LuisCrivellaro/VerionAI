@@ -10,7 +10,12 @@ Formato de entrega do MVP (skill ``verion-ffmpeg-assembly``): H.264, 1920x1080, 
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import tempfile
+import threading
+from collections.abc import Buffer, Iterable
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -26,6 +31,7 @@ __all__ = [
     "is_delivery_format",
     "probe",
     "run",
+    "run_rawvideo",
 ]
 
 DELIVERY_CODEC: Final = "h264"
@@ -67,6 +73,80 @@ def run(args: list[str], *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> None:
     """
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args]
     _execute(cmd, timeout_s)
+
+
+def run_rawvideo(frames: Iterable[Buffer], args: list[str], *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> None:
+    """Roda ``ffmpeg -y -hide_banner -loglevel error <args>`` alimentando o stdin com ``frames`` (bytes brutos).
+
+    ``args`` NÃO inclui o binário e precisa ler de ``pipe:0``. Cada quadro é um objeto com buffer contíguo
+    (``bytes``, ``memoryview``, ``numpy.ndarray`` C-contíguo). As garantias são as de ``run``: sem shell, o stdin
+    do processo é o pipe de quadros (nunca o terminal), e toda falha vira ``FfmpegError`` com o fim do ``stderr``
+    (``exc.stderr`` guarda tudo): binário ausente, código de saída ≠ 0, ffmpeg que encerra sem ler os quadros e
+    tempo esgotado.
+
+    O prazo ``timeout_s`` vale para a chamada inteira, inclusive o tempo que ``frames`` leva para produzir os
+    quadros. Um vigia (``threading.Timer``) mata o grupo de processos do ffmpeg quando o prazo acaba: isso destrava
+    uma escrita bloqueada (ffmpeg que parou de ler) e não deixa processo órfão. Se ``frames`` levantar, o ffmpeg
+    é morto e a exceção sobe sem alteração.
+    """
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args]
+    with tempfile.TemporaryFile() as err:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                start_new_session=True,  # grupo próprio: o vigia mata o ffmpeg e qualquer filho
+            )
+        except FileNotFoundError as exc:
+            raise FfmpegError(f"{cmd[0]} não encontrado no PATH; instale o ffmpeg", stderr=str(exc)) from exc
+        expired = threading.Event()
+
+        def _expire() -> None:
+            expired.set()
+            _kill_group(proc)
+
+        watchdog = threading.Timer(timeout_s, _expire)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            stdin = proc.stdin
+            assert stdin is not None
+            try:
+                for frame in frames:
+                    stdin.write(memoryview(frame).cast("B"))
+            except BrokenPipeError:
+                pass  # o ffmpeg encerrou (ou foi morto) antes do fim: o código de saída e o stderr explicam
+            finally:
+                try:
+                    stdin.close()
+                except BrokenPipeError:
+                    pass
+            code = proc.wait()
+        except BaseException:
+            _kill_group(proc)
+            proc.wait()
+            raise
+        finally:
+            watchdog.cancel()
+        if code != 0:
+            _kill_group(proc)  # filhos que sobraram
+        err.seek(0)
+        stderr = err.read().decode("utf-8", "replace")
+    tail = stderr[-_STDERR_TAIL:].strip()
+    if code != 0 and expired.is_set():
+        raise FfmpegError(f"{cmd[0]} excedeu o tempo limite de {timeout_s:g} s: {tail}", stderr=stderr)
+    if code != 0:
+        raise FfmpegError(f"{cmd[0]} terminou com código {code}: {tail}", stderr=stderr)
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    """SIGKILL no grupo de processos do ffmpeg (``start_new_session``: pgid = pid). Silencioso se já acabou."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _execute(cmd: list[str], timeout_s: float) -> str:

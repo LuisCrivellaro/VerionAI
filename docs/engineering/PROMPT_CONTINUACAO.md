@@ -50,13 +50,15 @@ Luis Crivellaro: estudante de Engenharia de Software (FIAP), empreendedor, quer 
 - A trava resistiu a todas as tentativas de burla feitas pelo revisor.
 - A branch `wip/t1-revisao` já foi mesclada em `setup/agent-team`.
 
+**T2 concluída e aprovada** (contrato dos adaptadores, registry, helper de contrato e `fake`): 344 testes verdes, evidências 08 e 09. Leia as pendências da evidência 09 antes de delegar T3, T8 e T9.
+
 ## 4. O que fazer agora (em ordem)
 
 1. **Agentes:** os `verion-*` só carregam no início da sessão.
    - Se não aparecerem para a ferramenta Agent, copie `.claude/agents/verion-*.md` para `~/.claude/agents/`.
    - Se continuarem sem aparecer, delegue a `general-purpose` com a definição do agente (o arquivo `.md`) no prompt.
    - Não reinstale skills nem o plugin.
-2. **Siga a ordem da spec (próximo: T2):**
+2. **Siga a ordem da spec (próximo: {T3, T5, T8, T9}; T1 e T2 já prontas):**
    - Faça a T2. A regra 4 do AST deve conferir os caminhos de `METHODS` contra as classes verificadas. Corrija também o erro de `mypy` em `ledger/repo.py:349` (`list_attempts`).
    - Depois {T3, T5, T8, T9}, em paralelo só quando não houver arquivos em comum. A T3 testa que uma exceção em `settle_ok` cai em `settle_error` com a reserva.
    - Depois {T6, T7}, T4 e T12.

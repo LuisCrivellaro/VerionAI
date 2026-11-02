@@ -6,6 +6,7 @@ Sem rede, sem chave de API, sem ffmpeg. Os preços são os fictícios de tests/c
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -140,6 +141,7 @@ def test_contract_passes_on_the_fake(
         scene=scene,
         good_client=FakeClient(),
         out_dir=out_dir,
+        max_client_calls=2,  # submit + fetch
     )
 
 
@@ -153,6 +155,7 @@ def test_contract_authorizes_1000_and_leaves_no_pending_rows(
         scene=scene,
         good_client=FakeClient(),
         out_dir=out_dir,
+        max_client_calls=2,  # submit + fetch
     )
     assert repo.authorized_brl(conn) == 1000.0
     attempts = repo.list_attempts(conn)
@@ -207,7 +210,8 @@ def _register(monkeypatch: pytest.MonkeyPatch, cls: type, method: str = "fake") 
 
 
 class GoodBase:
-    """Gerador mínimo correto; os defeituosos herdam e quebram uma regra por vez."""
+    """Gerador mínimo correto (1 chamada ao client, job aceito e registrado); os defeituosos herdam
+    e quebram uma regra por vez."""
 
     method, provider, model = "fake", "fake", "fake-1"
 
@@ -217,12 +221,16 @@ class GoodBase:
     def estimate(self, scene: Scene) -> CostEstimate:
         return CostEstimate(units=scene.duration_s, unit_kind="video_seconds")
 
+    def submit(self, req: SceneRequest) -> str:
+        return self.client.submit(req.scene)  # type: ignore[attr-defined,no-any-return]
+
     def generate(self, req: SceneRequest, token: SpendToken) -> SceneResult:
         token.consume(self.method)
-        self.client.submit(req.scene)  # type: ignore[attr-defined]
-        return self._write(req)
+        job_id = self.submit(req)
+        token.job_accepted(job_id)
+        return self._write(req, job_id)
 
-    def _write(self, req: SceneRequest) -> SceneResult:
+    def _write(self, req: SceneRequest, job_id: str) -> SceneResult:
         req.out_path.parent.mkdir(parents=True, exist_ok=True)
         req.out_path.write_bytes(b"bytes")
         return SceneResult(
@@ -234,6 +242,7 @@ class GoodBase:
             req.scene.duration_s,
             "video_seconds",
             False,
+            provider_job_id=job_id,
         )
 
 
@@ -242,16 +251,62 @@ class SpyableClient:
         return "job"
 
 
+class _Models:
+    def generate_videos(self, scene: Scene) -> str:
+        return "job"
+
+
+class NestedClient:
+    """Imita o formato do SDK google-genai: ``client.models.generate_videos(...)``."""
+
+    models = _Models()
+
+
+class NestedGood(GoodBase):
+    def submit(self, req: SceneRequest) -> str:
+        return self.client.models.generate_videos(req.scene)  # type: ignore[attr-defined,no-any-return]
+
+
+class NestedCallBeforeConsume(NestedGood):
+    def generate(self, req: SceneRequest, token: SpendToken) -> SceneResult:
+        job_id = self.submit(req)  # chama o SDK ANTES de consumir o token
+        token.consume(self.method)
+        token.job_accepted(job_id)
+        return self._write(req, job_id)
+
+
+class NestedAccessBeforeConsume(NestedGood):
+    def generate(self, req: SceneRequest, token: SpendToken) -> SceneResult:
+        _ = self.client.models  # type: ignore[attr-defined]  # só lê o atributo, sem chamar
+        return super().generate(req, token)
+
+
 class UsesClientBeforeConsume(GoodBase):
     def generate(self, req: SceneRequest, token: SpendToken) -> SceneResult:
-        self.client.submit(req.scene)  # type: ignore[attr-defined]
+        job_id = self.submit(req)
         token.consume(self.method)
-        return self._write(req)
+        token.job_accepted(job_id)
+        return self._write(req, job_id)
 
 
 class NeverConsumes(GoodBase):
     def generate(self, req: SceneRequest, token: SpendToken) -> SceneResult:
-        return self._write(req)
+        return self._write(req, "job")
+
+
+class NoJobAccepted(GoodBase):
+    def generate(self, req: SceneRequest, token: SpendToken) -> SceneResult:
+        token.consume(self.method)
+        return self._write(req, self.submit(req))
+
+
+class SubmitsTwice(GoodBase):
+    def generate(self, req: SceneRequest, token: SpendToken) -> SceneResult:
+        token.consume(self.method)
+        self.submit(req)  # job órfão: faturado e sem id no ledger
+        job_id = self.submit(req)
+        token.job_accepted(job_id)
+        return self._write(req, job_id)
 
 
 class WrongUnitKind(GoodBase):
@@ -265,25 +320,39 @@ class ZeroUnitsWhenPaid(GoodBase):
 
 
 class NoFileWritten(GoodBase):
-    def _write(self, req: SceneRequest) -> SceneResult:
+    def _write(self, req: SceneRequest, job_id: str) -> SceneResult:
         return SceneResult(
-            req.out_path, 5.0, 1920, 1080, 30.0, 5.0, "video_seconds", False
+            req.out_path, 5.0, 1920, 1080, 30.0, 5.0, "video_seconds", False, job_id
         )
 
 
 class WritesElsewhere(GoodBase):
-    def _write(self, req: SceneRequest) -> SceneResult:
+    def _write(self, req: SceneRequest, job_id: str) -> SceneResult:
         other = req.out_path.with_name("outro.mp4")
         other.write_bytes(b"x")
-        return SceneResult(other, 5.0, 1920, 1080, 30.0, 5.0, "video_seconds", False)
-
-
-class ZeroUnitsInResult(GoodBase):
-    def _write(self, req: SceneRequest) -> SceneResult:
-        result = super()._write(req)
         return SceneResult(
-            result.clip_path, 5.0, 1920, 1080, 30.0, 0.0, "video_seconds", False
+            other, 5.0, 1920, 1080, 30.0, 5.0, "video_seconds", False, job_id
         )
+
+
+def _mutating(name: str, **changes: object) -> type:
+    """Cria um gerador igual ao ``GoodBase`` cujo ``SceneResult`` sai com ``changes`` aplicados."""
+
+    def _write(self: GoodBase, req: SceneRequest, job_id: str) -> SceneResult:
+        return dataclasses.replace(GoodBase._write(self, req, job_id), **changes)  # type: ignore[arg-type]
+
+    return type(name, (GoodBase,), {"_write": _write})
+
+
+ZeroUnitsInResult = _mutating("ZeroUnitsInResult", units=0.0)
+UnitsTiny = _mutating("UnitsTiny", units=0.05)  # 1% do estimado (5.0)
+UnitsHuge = _mutating("UnitsHuge", units=500.0)  # 100x o estimado
+ZeroWidth = _mutating("ZeroWidth", width=0)
+ZeroHeight = _mutating("ZeroHeight", height=0)
+ZeroFps = _mutating("ZeroFps", fps=0.0)
+ZeroDuration = _mutating("ZeroDuration", duration_s=0.0)
+JobIdMismatch = _mutating("JobIdMismatch", provider_job_id="outro-id")
+ResultWithoutJobId = _mutating("ResultWithoutJobId", provider_job_id=None)
 
 
 class WrongMethodAttribute(GoodBase):
@@ -300,15 +369,23 @@ class MissingGenerate:
 
 
 def run_contract(
-    prices: PriceTable, conn: sqlite3.Connection, scene: Scene, out_dir: Path, cls: type
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    cls: type,
+    *,
+    good_client: object | None = None,
+    **kwargs: Any,
 ) -> None:
     assert_generator_contract(
         lambda client: cls(client),
         conn=conn,
         prices=prices,
         scene=scene,
-        good_client=SpyableClient(),
+        good_client=SpyableClient() if good_client is None else good_client,
         out_dir=out_dir,
+        **kwargs,
     )
 
 
@@ -323,20 +400,42 @@ def test_contract_accepts_the_minimal_good_generator(
     run_contract(prices, conn, scene, out_dir, GoodBase)
 
 
-@pytest.mark.parametrize(
-    "cls",
-    [
-        UsesClientBeforeConsume,
-        NeverConsumes,
-        WrongUnitKind,
-        ZeroUnitsWhenPaid,
-        NoFileWritten,
-        WritesElsewhere,
-        ZeroUnitsInResult,
-        WrongMethodAttribute,
-        MissingGenerate,
-    ],
-)
+def test_contract_accepts_a_generator_using_a_nested_sdk_client(
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register(monkeypatch, NestedGood)
+    run_contract(prices, conn, scene, out_dir, NestedGood, good_client=NestedClient())
+
+
+DEFECTIVE = [
+    UsesClientBeforeConsume,
+    NeverConsumes,
+    WrongUnitKind,
+    ZeroUnitsWhenPaid,
+    NoFileWritten,
+    WritesElsewhere,
+    ZeroUnitsInResult,
+    WrongMethodAttribute,
+    MissingGenerate,
+    # rodada 2 (revisão 08)
+    NoJobAccepted,
+    JobIdMismatch,
+    ResultWithoutJobId,
+    SubmitsTwice,
+    UnitsTiny,
+    UnitsHuge,
+    ZeroWidth,
+    ZeroHeight,
+    ZeroFps,
+    ZeroDuration,
+]
+
+
+@pytest.mark.parametrize("cls", DEFECTIVE, ids=lambda c: c.__name__)
 def test_contract_rejects_defective_generators(
     cls: type,
     prices: PriceTable,
@@ -348,6 +447,136 @@ def test_contract_rejects_defective_generators(
     _register(monkeypatch, cls)
     with pytest.raises(AssertionError):
         run_contract(prices, conn, scene, out_dir, cls)
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [NestedCallBeforeConsume, NestedAccessBeforeConsume],
+    ids=lambda c: c.__name__,
+)
+def test_contract_rejects_nested_sdk_use_before_consume(
+    cls: type,
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register(monkeypatch, cls)
+    with pytest.raises(AssertionError, match="consume"):
+        run_contract(prices, conn, scene, out_dir, cls, good_client=NestedClient())
+
+
+def test_contract_call_cap_is_adjustable(
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Polling legítimo faz mais de uma chamada: o limite sobe por parâmetro (padrão: 1)."""
+
+    class Polls(GoodBase):
+        def submit(self, req: SceneRequest) -> str:
+            job_id = super().submit(req)
+            self.client.submit(req.scene)  # type: ignore[attr-defined]  # uma consulta de status
+            return job_id
+
+    _register(monkeypatch, Polls)
+    with pytest.raises(AssertionError, match="chamadas"):
+        run_contract(prices, conn, scene, out_dir, Polls)
+    other = repo.connect(tmp_path / "segundo.db")  # o primeiro banco ficou sujo
+    try:
+        run_contract(prices, other, scene, out_dir, Polls, max_client_calls=2)
+    finally:
+        other.close()
+
+
+def test_contract_units_tolerance_is_adjustable(
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _register(monkeypatch, UnitsHuge)
+    with pytest.raises(AssertionError, match="units"):
+        run_contract(prices, conn, scene, out_dir, UnitsHuge)
+    other = repo.connect(tmp_path / "segundo.db")  # o primeiro banco ficou sujo
+    try:
+        run_contract(
+            prices, other, scene, out_dir, UnitsHuge, units_tolerance=(0.5, 200.0)
+        )
+    finally:
+        other.close()
+
+
+def test_contract_rejects_a_dirty_database(
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    new_run: NewRun,
+    authorize: Callable[[float], int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O helper escreve no ledger: só aceita um banco descartável (sem autorização, runs ou tentativas)."""
+    _register(monkeypatch, GoodBase)
+    authorize(10.0)
+    with pytest.raises(AssertionError, match="descart"):
+        run_contract(prices, conn, scene, out_dir, GoodBase)
+    assert repo.authorized_brl(conn) == 10.0  # nada foi acrescentado
+    assert repo.list_attempts(conn) == []
+
+
+def test_contract_rejects_a_database_with_runs(
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    new_run: NewRun,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register(monkeypatch, GoodBase)
+    new_run("fake")
+    with pytest.raises(AssertionError, match="descart"):
+        run_contract(prices, conn, scene, out_dir, GoodBase)
+
+
+def test_contract_rejects_a_database_with_attempts(
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    new_run: NewRun,
+    authorize: Callable[[float], int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register(monkeypatch, GoodBase)
+    authorize(100.0)
+    run_id = new_run("fake")
+    budget.reserve(
+        conn, prices, run_id=run_id, scene_index=1, target_s=5.0, method="fake",
+        provider="fake", model="fake-1", units=1.0, unit_kind="video_seconds", allow_paid=True,
+    )  # fmt: skip
+    with pytest.raises(AssertionError, match="descart"):
+        run_contract(prices, conn, scene, out_dir, GoodBase)
+
+
+def test_contract_wraps_the_same_database_only_once(
+    prices: PriceTable,
+    conn: sqlite3.Connection,
+    scene: Scene,
+    out_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Segunda chamada no mesmo banco falha: o primeiro uso já o sujou."""
+    _register(monkeypatch, GoodBase)
+    run_contract(prices, conn, scene, out_dir, GoodBase)
+    with pytest.raises(AssertionError, match="descart"):
+        run_contract(prices, conn, scene, out_dir, GoodBase)
 
 
 def test_contract_rejects_the_wrong_class_for_a_registered_id(
@@ -379,6 +608,32 @@ def test_spy_client_counts_accesses_and_calls() -> None:
     assert spy.ping(1) == 2
     assert (spy.accesses, spy.calls) == (2, 1)
     assert spy.ping(2) == 3
+    assert spy.calls == 2
+
+
+def test_spy_client_wraps_nested_attributes_and_counts_nested_calls() -> None:
+    spy = SpyClient(NestedClient())
+    method = spy.models.generate_videos
+    assert (spy.accesses, spy.calls) == (2, 0)  # acessar aninhado já conta
+    assert method(Scene) == "job"
+    assert (spy.accesses, spy.calls) == (2, 1)
+    assert spy.models.generate_videos(Scene) == "job"
+    assert (spy.accesses, spy.calls) == (4, 2)
+
+
+def test_spy_client_returns_primitives_and_call_results_unwrapped() -> None:
+    class Target:
+        name = "x"
+        limit = 3
+        flag = True
+        nothing = None
+
+        def make(self) -> list[int]:
+            return [1, 2]
+
+    spy = SpyClient(Target())
+    assert (spy.name, spy.limit, spy.flag, spy.nothing) == ("x", 3, True, None)
+    assert spy.make() == [1, 2] and type(spy.make()) is list
     assert spy.calls == 2
 
 

@@ -1,18 +1,32 @@
 """Helper de contrato dos adaptadores (spec 3.4). Sem pytest: falhas viram ``AssertionError``.
 
 Cada tarefa de adaptador chama ``assert_generator_contract`` no próprio teste, com o próprio mock:
-sem rede e sem mock alheio. O helper escreve no ``conn`` recebido (autorização de R$ 1.000 para métodos
-pagos, runs e tentativas de teste), então deve receber um banco descartável. Este é, junto com a CLI,
-o único módulo de ``src/verion`` autorizado a chamar ``add_authorization`` (allow-list do teste AST).
+sem rede e sem mock alheio. ``good_client`` TEM de ser um mock/fake local (o helper chama o adaptador
+de verdade, então um client real geraria chamadas e custo). O helper escreve no ``conn`` recebido
+(autorização de R$ 1.000 para métodos pagos, runs e tentativas de teste) e por isso EXIGE um banco
+descartável: com autorização, run ou tentativa prévios ele recusa. Este é, junto com a CLI, o único
+módulo de ``src/verion`` autorizado a chamar ``add_authorization`` (allow-list do teste AST).
 
 O que o contrato verifica:
 
 1. ``isinstance(gen, SceneGenerator)`` e ``METHODS[gen.method]`` apontando para a classe de ``gen``;
 2. ``estimate`` com o ``unit_kind`` da tabela e ``units > 0`` se o método é pago;
-3. token forjado, já usado ou de outro método → ``TokenInvalid``, com ``SpyClient.calls == 0`` e sem
-   arquivo gravado (``token.consume`` é a primeira instrução de ``generate``);
-4. com ``good_client`` e um token de ``budget.reserve``: ``SceneResult`` coerente, com o arquivo em
-   ``req.out_path``, e liquidável por ``budget.settle_ok``.
+3. token forjado, já usado ou de outro método → ``TokenInvalid``, sem NENHUM acesso ao client
+   (``SpyClient.accesses == 0`` e ``calls == 0``, inclusive em atributos aninhados como
+   ``client.models.generate_videos``; vale também para o construtor) e sem arquivo gravado
+   (``token.consume`` é a primeira instrução de ``generate``);
+4. com ``good_client`` e um token de ``budget.reserve``: ``SceneResult`` coerente (arquivo em
+   ``req.out_path``; largura, altura, fps e duração > 0; ``units`` dentro de ``units_tolerance`` do
+   ``estimate``), no máximo ``max_client_calls`` chamadas ao client, e liquidável por
+   ``budget.settle_ok``. Em método pago, ``token.job_accepted`` precisa ter gravado no ledger o
+   mesmo ``provider_job_id`` do resultado (sem isso, um crash deixaria o job faturado sem id).
+
+``max_client_calls`` vale 1 por padrão (uma submissão). Adaptadores com polling ou upload passam o
+limite exato do próprio mock (ex.: submit + 2 consultas = 3).
+
+Fora deste helper (item 6 da revisão 08): as falhas ``transient`` (antes do aceite) e pós-aceite
+(``ProviderError(billed_units=...)``) são requisito dos testes de cada adaptador pago (T8, T9, T10, T11);
+o helper cobre apenas o caminho feliz e a recusa de token.
 """
 
 from __future__ import annotations
@@ -20,7 +34,6 @@ from __future__ import annotations
 import math
 import sqlite3
 from collections.abc import Callable
-from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -39,33 +52,58 @@ _OTHER_FREE_METHODS = (
 )  # grátis: reservam R$ 0,00, sem precisar de saldo
 
 
-class SpyClient:
-    """Embrulha um client e conta ``accesses`` (atributos lidos) e ``calls`` (chamadas, inclusive ao próprio client)."""
+_PRIMITIVES = (str, bytes, int, float, bool, type(None))
 
-    def __init__(self, wrapped: object) -> None:
-        self._wrapped = wrapped
+
+class _Counts:
+    """Contadores compartilhados entre o ``SpyClient`` raiz e todos os proxies filhos."""
+
+    def __init__(self) -> None:
         self.accesses = 0
         self.calls = 0
 
+
+class SpyClient:
+    """Embrulha um client e conta, em qualquer profundidade, ``accesses`` (atributos lidos) e ``calls``
+    (chamadas).
+
+    Atributos não primitivos (objetos, métodos) voltam embrulhados no mesmo contador, então
+    ``spy.models.generate_videos(...)`` conta 2 acessos e 1 chamada, o formato do SDK google-genai.
+    Primitivos (str, bytes, números, bool, None) e o retorno das chamadas voltam sem embrulho. É um
+    proxy de mock: dunders (``__iter__``, ``__enter__``...) e escrita de atributos não são repassados.
+    """
+
+    def __init__(self, wrapped: object, _counts: _Counts | None = None) -> None:
+        object.__setattr__(self, "_wrapped", wrapped)
+        object.__setattr__(
+            self, "_counts", _counts if _counts is not None else _Counts()
+        )
+
+    @property
+    def accesses(self) -> int:
+        counts: _Counts = object.__getattribute__(self, "_counts")
+        return counts.accesses
+
+    @property
+    def calls(self) -> int:
+        counts: _Counts = object.__getattribute__(self, "_counts")
+        return counts.calls
+
     def __getattr__(self, name: str) -> Any:
-        # Só roda para nomes que a própria SpyClient não tem; `_wrapped`, `accesses` e `calls` não contam.
-        if name.startswith("__") or name == "_wrapped":
+        # Só roda para nomes que o proxy não tem (``_wrapped``, ``_counts``, ``accesses`` e ``calls`` não contam).
+        if name.startswith("__") or name in ("_wrapped", "_counts"):
             raise AttributeError(name)
-        self.accesses += 1
-        attr = getattr(self._wrapped, name)
-        if not callable(attr):
+        counts: _Counts = object.__getattribute__(self, "_counts")
+        counts.accesses += 1
+        attr = getattr(object.__getattribute__(self, "_wrapped"), name)
+        if isinstance(attr, _PRIMITIVES):
             return attr
-
-        @wraps(attr)
-        def counted(*args: Any, **kwargs: Any) -> Any:
-            self.calls += 1
-            return attr(*args, **kwargs)
-
-        return counted
+        return SpyClient(attr, counts)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        self.calls += 1
-        return self._wrapped(*args, **kwargs)  # type: ignore[operator]
+        counts: _Counts = object.__getattribute__(self, "_counts")
+        counts.calls += 1
+        return object.__getattribute__(self, "_wrapped")(*args, **kwargs)
 
 
 def _check(condition: bool, message: str) -> None:
@@ -87,8 +125,23 @@ def assert_generator_contract(
     scene: Scene,
     good_client: object,
     out_dir: Path,
+    max_client_calls: int = 1,
+    units_tolerance: tuple[float, float] = (0.5, 2.0),
 ) -> None:
-    """Verifica o contrato da spec 3.4. ``factory(client)`` cria o adaptador com o client injetado."""
+    """Verifica o contrato da spec 3.4. ``factory(client)`` cria o adaptador com o client injetado.
+
+    ``conn`` deve ser um banco descartável e ``good_client`` um mock (ver o docstring do módulo).
+    ``result.units`` precisa ficar entre ``units_tolerance[0]`` e ``units_tolerance[1]`` vezes o ``estimate``.
+    """
+    _check(
+        not repo.list_authorizations(conn)
+        and not repo.list_runs(conn)
+        and not repo.list_attempts(conn),
+        "conn precisa ser um banco descartável (sem autorizações, runs ou tentativas): o helper grava nele",
+    )
+    _check(max_client_calls >= 0, f"max_client_calls inválido: {max_client_calls!r}")
+    low, high = units_tolerance
+    _check(0 < low <= high, f"units_tolerance inválida: {units_tolerance!r}")
     gen = factory(good_client)
 
     # (1) tipo e registry
@@ -180,8 +233,9 @@ def assert_generator_contract(
                 f"contrato do adaptador: token {label} foi aceito por generate"
             )
         _check(
-            spy.calls == 0,
-            f"token {label}: o client foi chamado {spy.calls}x antes de token.consume",
+            spy.calls == 0 and spy.accesses == 0,
+            f"token {label}: o client foi usado antes de token.consume "
+            f"({spy.accesses} acessos, {spy.calls} chamadas)",
         )
         _check(not out.exists(), f"token {label}: arquivo gravado apesar da recusa")
 
@@ -234,6 +288,30 @@ def assert_generator_contract(
     _check(
         not paid or result.units > 0, f"método pago com result.units={result.units!r}"
     )
+    _check(
+        low * est.units <= result.units <= high * est.units,
+        f"result.units={result.units!r} fora de {low}x a {high}x do estimate.units={est.units!r}",
+    )
+    for field_name in ("duration_s", "width", "height", "fps"):
+        value = getattr(result, field_name)
+        _check(
+            isinstance(value, int | float) and math.isfinite(value) and value > 0,
+            f"result.{field_name}={value!r} deve ser > 0",
+        )
+    _check(
+        spy.calls <= max_client_calls,
+        f"o client recebeu {spy.calls} chamadas no caminho feliz (máximo {max_client_calls}); "
+        "submissão duplicada fatura duas vezes. Com polling, aumente max_client_calls",
+    )
+    if paid:
+        # Se o processo cair depois do aceite, só o ledger sabe qual job foi faturado.
+        row = repo.get_attempt(conn, token.attempt_id)
+        recorded = None if row is None else row.provider_job_id
+        _check(
+            recorded is not None and recorded == result.provider_job_id,
+            f"token.job_accepted não gravou o id do job no ledger "
+            f"(ledger={recorded!r}, result.provider_job_id={result.provider_job_id!r})",
+        )
     # O resultado precisa ser liquidável: é o que o harness fará logo em seguida.
     budget.settle_ok(
         conn,

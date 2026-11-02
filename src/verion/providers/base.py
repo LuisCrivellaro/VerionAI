@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import random
+import socket
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -108,8 +109,10 @@ class SceneGenerator(Protocol):
         ...
 
 
-# Falhas de rede da stdlib que um adaptador pode deixar escapar antes do aceite.
-_NETWORK_ERRORS: Final = (ConnectionError, TimeoutError)
+# Únicas falhas de stdlib com prova de que ocorreram ANTES do envio do pedido (porta recusada, DNS que
+# não resolve). ConnectionError genérico, ConnectionResetError, BrokenPipeError e TimeoutError NÃO entram:
+# o POST pode ter sido aceito e faturado, e repeti-lo duplicaria a cobrança.
+_SAFE_BEFORE_SEND: Final = (ConnectionRefusedError, socket.gaierror)
 
 
 def retry_before_accept[T](
@@ -125,15 +128,20 @@ def retry_before_accept[T](
     """Executa ``call`` (a submissão do job) com backoff exponencial e jitter, só enquanto nada foi aceito.
 
     Repete apenas:
-    - ``ProviderError`` com ``transient=True``, ``billed_units == 0`` e sem ``provider_job_id``
-      (se algo foi faturado ou o job existe, repetir duplicaria a cobrança: relança na hora);
-    - ``ConnectionError`` e ``TimeoutError`` da stdlib. Esgotadas as tentativas, viram
+    - ``ProviderError`` com ``transient=True``, ``billed_units == 0`` e ``provider_job_id is None``.
+      Quem classifica é o ADAPTADOR: ele só marca ``transient=True`` quando sabe que o pedido não foi
+      aceito (ex.: HTTP 429/503 devolvido pelo provedor). Se algo foi faturado ou o job existe, repetir
+      duplicaria a cobrança e a exceção sobe na hora;
+    - ``ConnectionRefusedError`` e ``socket.gaierror``, as únicas falhas de rede da stdlib que
+      comprovadamente acontecem antes do envio. Esgotadas as tentativas, viram
       ``ProviderError(transient=True)`` com a causa encadeada.
 
-    Qualquer outra exceção (bug, chave inválida, erro permanente) sobe imediatamente. Espera entre
-    tentativas: ``min(max_s, initial_s * 2**(n-1)) + rng() * jitter_s``. O total fica limitado por
-    ``attempts`` e ``max_s``; o timeout de cada chamada é responsabilidade do adaptador. Cada nova
-    tentativa é registrada em log (nível WARNING).
+    NÃO repete ``ConnectionError`` genérico, ``ConnectionResetError``, ``TimeoutError`` nem
+    ``socket.timeout``: são ambíguos (o POST pode ter chegado e sido faturado), então sobem sem
+    alteração para o adaptador decidir. Qualquer outra exceção (bug, chave inválida, erro permanente)
+    também sobe imediatamente. Espera entre tentativas: ``min(max_s, initial_s * 2**(n-1)) + rng() *
+    jitter_s``. O total fica limitado por ``attempts`` e ``max_s``; o timeout de cada chamada é
+    responsabilidade do adaptador. Cada nova tentativa é registrada em log (nível WARNING).
     """
     if attempts < 1:
         raise ValueError(f"attempts deve ser >= 1, veio {attempts!r}")
@@ -147,10 +155,11 @@ def retry_before_accept[T](
             if not retryable or attempt == attempts:
                 raise
             reason: BaseException = exc
-        except _NETWORK_ERRORS as exc:
+        except _SAFE_BEFORE_SEND as exc:
             if attempt == attempts:
                 raise ProviderError(
-                    f"falha de rede após {attempts} tentativas: {exc}", transient=True
+                    f"falha antes do envio após {attempts} tentativas: {exc}",
+                    transient=True,
                 ) from exc
             reason = exc
         delay = min(max_s, initial_s * 2 ** (attempt - 1)) + rng() * jitter_s

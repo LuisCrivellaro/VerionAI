@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import logging
+import socket
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -352,8 +353,26 @@ def test_retry_does_not_swallow_bugs() -> None:
     assert flaky.calls == 1
 
 
-@pytest.mark.parametrize("error", [ConnectionError("reset"), TimeoutError("lento")])
-def test_retry_retries_stdlib_network_errors(error: Exception) -> None:
+# Só falhas que comprovadamente ocorrem ANTES do envio do pedido podem ser repetidas. Reset de conexão
+# e timeout são ambíguos (o POST pode ter sido aceito e faturado): o adaptador os classifica.
+SAFE_BEFORE_SEND = [
+    ConnectionRefusedError("recusada"),
+    socket.gaierror(socket.EAI_NONAME, "nome desconhecido"),
+]
+AMBIGUOUS = [
+    ConnectionError("reset"),
+    ConnectionResetError("reset pelo par"),
+    ConnectionAbortedError("abortada"),
+    BrokenPipeError("pipe"),
+    TimeoutError("lento"),
+    OSError("generico"),
+]
+
+
+@pytest.mark.parametrize("error", SAFE_BEFORE_SEND, ids=lambda e: type(e).__name__)
+def test_retry_retries_failures_that_happen_before_the_request_is_sent(
+    error: Exception,
+) -> None:
     flaky = Flaky(1, error)
     assert (
         retry_before_accept(flaky, attempts=2, jitter_s=0.0, sleep=lambda s: None)
@@ -362,13 +381,38 @@ def test_retry_retries_stdlib_network_errors(error: Exception) -> None:
     assert flaky.calls == 2
 
 
-def test_retry_converts_exhausted_network_errors_to_transient_provider_error() -> None:
-    flaky = Flaky(9, TimeoutError("lento"))
+@pytest.mark.parametrize("error", AMBIGUOUS, ids=lambda e: type(e).__name__)
+def test_retry_never_retries_ambiguous_network_errors(error: Exception) -> None:
+    """Regressão da revisão 08: repetir um POST que pode ter sido aceito duplica a cobrança."""
+    flaky = Flaky(5, error)
+    sleeps: list[float] = []
+    with pytest.raises(type(error)) as exc:
+        retry_before_accept(flaky, attempts=5, sleep=sleeps.append)
+    assert exc.value is error
+    assert flaky.calls == 1 and sleeps == []
+
+
+@pytest.mark.parametrize("error", SAFE_BEFORE_SEND, ids=lambda e: type(e).__name__)
+def test_retry_converts_exhausted_safe_network_errors_to_transient_provider_error(
+    error: Exception,
+) -> None:
+    flaky = Flaky(9, error)
     with pytest.raises(ProviderError) as exc:
         retry_before_accept(flaky, attempts=2, jitter_s=0.0, sleep=lambda s: None)
+    assert flaky.calls == 2
     assert exc.value.transient is True
     assert exc.value.billed_units == 0.0
-    assert isinstance(exc.value.__cause__, TimeoutError)
+    assert exc.value.provider_job_id is None
+    assert exc.value.__cause__ is error
+
+
+def test_retry_provider_error_classification_is_up_to_the_adapter() -> None:
+    """O adaptador que sabe que o pedido não saiu levanta ProviderError(transient=True) e é repetido."""
+    flaky = Flaky(1, ProviderError("503 antes do aceite", transient=True))
+    assert (
+        retry_before_accept(flaky, attempts=2, jitter_s=0.0, sleep=lambda s: None)
+        == "ok"
+    )
 
 
 def test_retry_logs_every_retry(caplog: pytest.LogCaptureFixture) -> None:

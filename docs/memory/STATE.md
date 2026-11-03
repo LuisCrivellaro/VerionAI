@@ -1,6 +1,6 @@
 # Estado do projeto
 
-Atualizado: 2026-11-02
+Atualizado: 2026-11-03
 
 ## Fase atual
 **Fase 0 — validação audiovisual**: ferramenta (harness) pronta e testada sem gasto; validação com imóveis reais aguarda decisões do usuário.
@@ -21,20 +21,20 @@ Atualizado: 2026-11-02
 - [x] **T12 (aceitação ponta a ponta) concluída** (evidência 14): nível padrão sempre (1124 passed, 13 skipped, ~107 s); fluxo completo opt-in com `VERION_E2E_FULL=1` (26 passed, ~122 s). Nenhum bug de produção.
 - [x] **HARNESS DA FASE 0 CONCLUÍDO SEM CHAMADAS PAGAS** (T1–T9, T12; T10 Kling e T11 Wan bloqueadas por decisão do usuário).
 - [x] Decisões do usuário registradas (ADR-011): sem gasto por ora; só Gemini Omni (T10/T11 fora); trava de permissões aplicada.
-- [ ] **PRÓXIMO PASSO (retomar em 2026-11-03):**
+- [x] **Sessão 2026-11-03 (revalidação em ambiente limpo):** `uv sync --frozen --extra gemini` + pytest → **1124 passed, 13 skipped (99 s)**; mypy limpo. Sem o extra `gemini`, a coleta quebra (`httpx`): agora documentado no README. `ruff check .` acusava 31 erros só em scripts de terceiros da skill gemini-omni-flash-api → `.claude` excluído do ruff (ADR-012).
+- [ ] **Trava de permissões ainda NÃO confirmada:** a sessão de 03/11 começou fora do repo (clone no meio da sessão), então o `echo budget authorize` passou sem valer como teste; e o `claude -p` headless falhou com erro de autenticação neste ambiente. Confirmar numa sessão aberta **já dentro do repo** (ou no Claude Code local do usuário).
+- [ ] **PRÓXIMO PASSO (depende do usuário):**
   1. Numa sessão nova, confirmar que a trava bloqueia (ex.: `echo budget authorize` deve ser negado).
   2. Usuário anexa fotos de 1–3 imóveis + código do termo; supervisor monta o roteiro (`property_id` tipo `imv-001`, fotos fora do git em `data/`).
   3. Rodar `ken-burns` nas fotos reais, gerar quadros de QC e montar o vídeo; usuário aprova no terminal (`APROVO tentativa N`).
   4. Parallax em fotos reais precisa de mapa de profundidade: avaliar modelo com licença comercial (Depth Anything V2 Small, Apache-2.0 — hipótese; Hugging Face bloqueado pelo proxy).
-  5. Chamada paga do Omni só após autorização futura do usuário.
-- [ ] Depois: {T3, T5, T8, T9} → {T6, T7} → T4 → T12. T10/T11 bloqueadas por decisão do usuário.
-- [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
+  5. Chamada paga do Omni só após autorização futura do usuário. **Pré-requisitos extras da 1ª chamada paga:** teto do `settle_ok` contra a reserva (hoje um clipe mais longo que o pedido pode estourar a reserva em até a duração máxima do modelo; o custo real continua gravado e a próxima `reserve` bloqueia, mas o excesso de uma tentativa não é impedido) e preço oficial do Omni em 1080p.
+  6. Depth Anything (pendência 4) continua inviável aqui: em 03/11, Hugging Face (timeout) e github.com/DepthAnything (403) bloqueados pelo proxy; só o PyPI passa. Gerar os `.depth.png` na máquina do usuário ou adiar o parallax real.
 
 ## Autorizações de gasto
 Nenhuma. Chamadas pagas (Gemini Omni, Veo, Kling, GPU) estão **bloqueadas** até o usuário autorizar o orçamento da Fase 0 (proposta: até R$ 350).
 
 ## Decisões de produto pendentes (usuário)
-0. Aplicar ou não a regra `permissions.deny` proposta no ADR-010 (agentes não autorizam gasto nem aprovam QC como humano)
 1. Cliente-alvo inicial (proposta: gestoras de temporada e imobiliárias de alto padrão)
 2. Orçamento da Fase 0 (até R$ 350)
 3. 3 imóveis de teste com autorização escrita para uso das fotos

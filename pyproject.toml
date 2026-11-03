@@ -25,6 +25,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/verion"]
 
+[tool.ruff]
+# Scripts de terceiros vendorizados nas skills (ex.: gemini-omni-flash-api, Apache-2.0): não são código do projeto.
+extend-exclude = [".claude"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers --import-mode=importlib"

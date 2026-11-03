@@ -1,5 +1,10 @@
 # Decisões (a mais recente no topo)
 
+## 2026-11-03 · ADR-012 · Higiene do ambiente limpo; teto do settle_ok adiado para antes da 1ª chamada paga
+- **Ruff:** `[tool.ruff] extend-exclude = [".claude"]`. Os scripts vendorizados nas skills (Google, Apache-2.0) não são código do projeto; `src` e `tests` já passavam.
+- **Setup documentado no README:** os testes exigem `uv sync --frozen --extra gemini`.
+- **Teto do `settle_ok` (follow-up do ADR-009): não implementado agora.** O custo real deve continuar sendo gravado (truncar esconderia gasto). O excesso de uma tentativa é limitado à duração máxima do modelo, e a `reserve` seguinte já vê o saldo. Com chamadas pagas bloqueadas e o preço do Omni ainda hipótese, isso entra como pré-requisito da 1ª chamada paga. Opção preferida: reservar pela duração máxima que o modelo pode devolver, para a liquidação nunca passar da reserva.
+
 ## 2026-11-02 · ADR-011 · Decisões do usuário: sem gasto por ora, só Gemini Omni, trava de permissões aplicada
 - **Orçamento:** nenhuma chamada paga por enquanto. A Fase 0 começa só com os métodos gratuitos (Ken Burns e parallax).
 - **Imóveis:** o usuário tem de 1 a 3 imóveis com termo de uso das fotos. Vai anexar as fotos e o código do termo (`photo_release_ref`).

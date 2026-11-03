@@ -66,7 +66,7 @@ Luis Crivellaro: estudante de Engenharia de Software (FIAP), empreendedor, quer 
    - Se não aparecerem para a ferramenta Agent, copie `.claude/agents/verion-*.md` para `~/.claude/agents/`.
    - Se continuarem sem aparecer, delegue a `general-purpose` com a definição do agente (o arquivo `.md`) no prompt.
    - Não reinstale skills nem o plugin.
-2. **Siga a ordem da spec (prontas: T1–T9 exceto T10/T11; próximo: T12, aceitação ponta a ponta pelo `verion-qa`):**
+2. **Harness concluído (T1–T9 e T12; evidência 14).** T10 (Kling) e T11 (Wan) bloqueadas. O próximo passo depende das decisões do usuário listadas em `STATE.md`. Itens abaixo ficam como referência:
    - Faça a T2. A regra 4 do AST deve conferir os caminhos de `METHODS` contra as classes verificadas. Corrija também o erro de `mypy` em `ledger/repo.py:349` (`list_attempts`).
    - Depois {T3, T5, T8, T9}, em paralelo só quando não houver arquivos em comum. A T3 testa que uma exceção em `settle_ok` cai em `settle_error` com a reserva.
    - Depois {T6, T7}, T4 e T12.

@@ -3,7 +3,7 @@
 Atualizado: 2026-11-02
 
 ## Fase atual
-**Fase 0 — validação audiovisual** (ainda não iniciada). Ambiente de agentes configurado nesta data.
+**Fase 0 — validação audiovisual**: ferramenta (harness) pronta e testada sem gasto; validação com imóveis reais aguarda decisões do usuário.
 
 ## Em andamento
 - [x] Setup da equipe de agentes, skills e memória (branch `setup/agent-team`)
@@ -18,7 +18,9 @@ Atualizado: 2026-11-02
 - [x] **T6 (parallax 2,5D) e T7 (montagem + QC) concluídas e aprovadas** (evidência 11, ADR-008). **655 testes verdes** (~90 s).
 - [x] **T8 (Veo) e T9 (Gemini Omni) concluídas e aprovadas com mocks** (evidência 12, ADR-009). **860 testes verdes** (~83 s). Veo preview descontinuado → Omni é o provedor pago principal.
 - [x] **T4 (CLI `verion`, relatório, export) concluída e aprovada** após revisão de código + segurança (evidência 13, ADR-010). **1111 testes verdes** (~93 s), ruff e mypy limpos.
-- [ ] **PRÓXIMO PASSO: T12 (aceitação ponta a ponta, verion-qa)** — critérios na linha T12 da spec; usar `photo_release_ref` só para métodos de terceiros; `fake` não está em `config/prices.toml` (usar prices de teste); `authorize` sem TTY → 2; aprovação humana precisa de pty. Depois: relatório final ao usuário e decisões pendentes (abaixo). T10 (Kling) e T11 (Wan) bloqueadas por decisão do usuário.
+- [x] **T12 (aceitação ponta a ponta) concluída** (evidência 14): nível padrão sempre (1124 passed, 13 skipped, ~107 s); fluxo completo opt-in com `VERION_E2E_FULL=1` (26 passed, ~122 s). Nenhum bug de produção.
+- [x] **HARNESS DA FASE 0 CONCLUÍDO SEM CHAMADAS PAGAS** (T1–T9, T12; T10 Kling e T11 Wan bloqueadas por decisão do usuário).
+- [ ] **PRÓXIMO PASSO: decisões do usuário** (lista abaixo) para iniciar a Fase 0 real: autorizar orçamento, fornecer 3 imóveis com termo de fotos, liberar `generativelanguage.googleapis.com` no proxy, colocar `GEMINI_API_KEY` no ambiente (pelo próprio usuário), confirmar preço oficial do Omni em 1080p. Antes da 1ª chamada paga: rodar `VERION_E2E_FULL=1` e anexar a saída como evidência. Opcional: merge de `setup/agent-team` em `main`.
 - [ ] Depois: {T3, T5, T8, T9} → {T6, T7} → T4 → T12. T10/T11 bloqueadas por decisão do usuário.
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 

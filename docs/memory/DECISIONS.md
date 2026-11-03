@@ -1,5 +1,21 @@
 # Decisões (a mais recente no topo)
 
+## 2026-11-03 · ADR-013 · Open-Higgsfield-AI (fork Autom8AI) como ferramenta principal de criação de vídeo
+- **Decisão do usuário:** o fork `Autom8AI/Open-Higgsfield-AI` (commit `d32d022`, 25/10/2026) passa a ser a ferramenta principal de geração image-to-video. Substitui o Gemini Omni como caminho pago principal (revisa ADR-009 e ADR-011). Ken Burns e parallax continuam como caminhos gratuitos.
+- **O que a ferramenta é (verificado lendo o código):**
+  - Interface web (Vite + JS puro; há também uma versão Next.js) que **não gera vídeo localmente**. Toda geração vai para APIs pagas: **kie.ai** (`api.kie.ai/api/v1/jobs/createTask`, chave Bearer no `localStorage`) e, no backend Netlify, fal.ai.
+  - Modelos de vídeo com entrada de imagem no fork: Seedance 2.0, Seedance 2.0 Fast, Seedance 1.5 Pro, Kling 3.0, HappyHorse 1.1 Reference. Wan 2.5 e Kling 3 Turbo são só texto→vídeo.
+  - O fork difere do original (`Anil-matcha/Open-Higgsfield-AI`, que usa Muapi.ai). Tem um backend "content-factory" com login por PIN, Airtable, Composio e Resend, e edge functions que referenciam scripts ausentes no repositório (deploy particular de terceiro).
+  - Licença: o README declara MIT, mas **o repositório não tem arquivo LICENSE**. Uso interno ok; redistribuir ou embutir no produto exige confirmar a licença.
+  - `npm install --ignore-scripts` + `npx vite build` compilam sem erro (03/11). Nenhuma geração foi testada.
+- **Como encaixa no VÉRION:**
+  - Uso como **estúdio manual** na Fase 0: o usuário roda localmente (`npm install && npm run vite:dev`), cola a chave do kie.ai e gera cena a cena a partir das fotos.
+  - O backend Netlify do fork (Airtable, Composio, Resend, login) **não será usado**.
+  - As regras continuam: cada clipe passa pelo `verion-fidelity-qc`; termo das fotos obrigatório; gasto só com autorização registrada.
+  - Integração automática: se o teste manual aprovar, criar um adaptador `kie` no harness (mesmo contrato de T2, com reserva e liquidação no ledger), em vez de depender da interface.
+- **Custos (hipótese, fontes secundárias, conferir em kie.ai antes de gastar):** Seedance 2.0 ~US$ 0,057/s no kie.ai (bitdoze.com); Kling 3.0 ~US$ 0,075–0,15/s conforme resolução e áudio (evolink.ai). Vídeo de 60 s, 12 cenas × 5 s × 3 tentativas = 180 s gerados ≈ US$ 10–27 (R$ 52–140 a 5,10).
+- **Riscos:** (1) a interface não registra custo no ledger do VÉRION, então o gasto precisa ser anotado à mão até existir o adaptador; (2) o `localStorage` guarda a chave e o histórico no navegador; (3) `api.kie.ai` está bloqueado no proxy da sessão em nuvem, então a geração só roda na máquina do usuário; (4) fidelidade não é garantida por nenhum desses modelos e continua sendo o critério de aprovação.
+
 ## 2026-11-03 · ADR-012 · Higiene do ambiente limpo; teto do settle_ok adiado para antes da 1ª chamada paga
 - **Ruff:** `[tool.ruff] extend-exclude = [".claude"]`. Os scripts vendorizados nas skills (Google, Apache-2.0) não são código do projeto; `src` e `tests` já passavam.
 - **Setup documentado no README:** os testes exigem `uv sync --frozen --extra gemini`.

@@ -5,6 +5,9 @@ Atualizado: 2026-11-03
 ## Fase atual
 **Fase 0 — validação audiovisual**: ferramenta (harness) pronta e testada sem gasto; validação com imóveis reais aguarda decisões do usuário.
 
+**Ferramenta principal de vídeo (ADR-013, 03/11):** Open-Higgsfield-AI (fork Autom8AI) com kie.ai (Seedance 2.0 / Kling 3.0), usada manualmente na máquina do usuário. Ken Burns e parallax continuam como fallback gratuito.
+**Próximo passo imediato:** usuário envia as fotos da acomodação (com termo) para o teste. Gerar com kie.ai exige chave própria e autorização de gasto registrada abaixo.
+
 ## Em andamento
 - [x] Setup da equipe de agentes, skills e memória (branch `setup/agent-team`)
 - [x] Spec do harness da Fase 0 escrita pelo verion-architect (rodada 1)

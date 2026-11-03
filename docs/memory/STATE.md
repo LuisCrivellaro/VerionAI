@@ -17,7 +17,8 @@ Atualizado: 2026-11-02
 - [x] **T3 (roteiro + harness) e T5 (ffmpeg + Ken Burns) concluídas e aprovadas** (evidência 10, ADR-007). **544 testes verdes**.
 - [x] **T6 (parallax 2,5D) e T7 (montagem + QC) concluídas e aprovadas** (evidência 11, ADR-008). **655 testes verdes** (~90 s).
 - [x] **T8 (Veo) e T9 (Gemini Omni) concluídas e aprovadas com mocks** (evidência 12, ADR-009). **860 testes verdes** (~83 s). Veo preview descontinuado → Omni é o provedor pago principal.
-- [ ] **PRÓXIMO PASSO: T4 (CLI)** e depois **T12 (aceitação ponta a ponta)**. Pendências para a T4: evidência 10 (runs vazios no relatório, `exc.verion_run_id`, exit codes), `short_clips` base 0, `extract` → `QcFrames`, client injetado deve usar `make_http_options`; mypy em `ledger/repo.py:349`; suíte < 120 s. T10 (Kling) e T11 (Wan) seguem bloqueadas por decisão do usuário.
+- [x] **T4 (CLI `verion`, relatório, export) concluída e aprovada** após revisão de código + segurança (evidência 13, ADR-010). **1111 testes verdes** (~93 s), ruff e mypy limpos.
+- [ ] **PRÓXIMO PASSO: T12 (aceitação ponta a ponta, verion-qa)** — critérios na linha T12 da spec; usar `photo_release_ref` só para métodos de terceiros; `fake` não está em `config/prices.toml` (usar prices de teste); `authorize` sem TTY → 2; aprovação humana precisa de pty. Depois: relatório final ao usuário e decisões pendentes (abaixo). T10 (Kling) e T11 (Wan) bloqueadas por decisão do usuário.
 - [ ] Depois: {T3, T5, T8, T9} → {T6, T7} → T4 → T12. T10/T11 bloqueadas por decisão do usuário.
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 
@@ -25,6 +26,7 @@ Atualizado: 2026-11-02
 Nenhuma. Chamadas pagas (Gemini Omni, Veo, Kling, GPU) estão **bloqueadas** até o usuário autorizar o orçamento da Fase 0 (proposta: até R$ 350).
 
 ## Decisões de produto pendentes (usuário)
+0. Aplicar ou não a regra `permissions.deny` proposta no ADR-010 (agentes não autorizam gasto nem aprovam QC como humano)
 1. Cliente-alvo inicial (proposta: gestoras de temporada e imobiliárias de alto padrão)
 2. Orçamento da Fase 0 (até R$ 350)
 3. 3 imóveis de teste com autorização escrita para uso das fotos

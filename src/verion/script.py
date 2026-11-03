@@ -6,7 +6,9 @@ para que um erro de digitação (``duracao_s``) não vire um valor padrão silen
 
 Formato::
 
-    property_id = "casa-01"            # ^[a-z0-9-]{1,32}$ (id neutro; nunca endereço ou nome)
+    property_id = "imv-001"            # ^[a-z0-9-]{1,32}$: CÓDIGO sem relação com o imóvel (nunca endereço ou nome)
+    photo_release_ref = "termo-0001"   # opcional: ref. curta ao termo de uso das fotos, sem nome (exigida pela CLI
+                                       # para métodos que enviam foto a terceiros)
 
     [[scenes]]
     index = 1                          # 1..12, sem repetição
@@ -38,7 +40,8 @@ MIN_DURATION_S: Final = 3.0
 MAX_DURATION_S: Final = 10.0
 
 _PROPERTY_ID: Final = re.compile(r"[a-z0-9-]{1,32}")  # usado com fullmatch: `$` aceitaria "\n" final
-_TOP_KEYS: Final = frozenset({"property_id", "scenes"})
+_TOP_KEYS: Final = frozenset({"property_id", "photo_release_ref", "scenes"})
+_RELEASE_REF: Final = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _REQUIRED: Final = ("index", "photo", "room", "camera", "duration_s", "prompt")
 _SCENE_KEYS: Final = frozenset({*_REQUIRED, "negative_prompt"})
 
@@ -51,6 +54,7 @@ class Script:
     path: Path
     sha256: str
     scenes: tuple[Scene, ...]
+    photo_release_ref: str | None = None  # referência ao termo de uso das fotos (LGPD); None = não informada
 
 
 def _text(value: object, field: str, where: str, *, allow_empty: bool = False) -> str:
@@ -112,7 +116,8 @@ def _parse_scene(raw: object, position: int, base_dir: Path) -> Scene:
 def load_script(path: Path) -> Script:
     """Lê e valida o roteiro. ``ScriptError``: arquivo ilegível, TOML inválido, ``property_id`` fora de
     ``^[a-z0-9-]{1,32}$``, número de cenas != 12, índice repetido ou fora de 1..12, foto ausente, câmera
-    inválida, duração fora de 3..10, campo ausente ou desconhecido."""
+    inválida, duração fora de 3..10, ``photo_release_ref`` fora de ``[A-Za-z0-9._-]{1,64}``, campo ausente ou
+    desconhecido."""
     path = Path(path)
     try:
         data = path.read_bytes()
@@ -133,6 +138,15 @@ def load_script(path: Path) -> Script:
     if not isinstance(property_id, str) or _PROPERTY_ID.fullmatch(property_id) is None:
         raise ScriptError(f"property_id deve casar com ^[a-z0-9-]{{1,32}}$, veio {property_id!r}")
 
+    release_ref = doc.get("photo_release_ref")
+    if release_ref is not None and (
+        not isinstance(release_ref, str) or _RELEASE_REF.fullmatch(release_ref) is None
+    ):
+        raise ScriptError(
+            "photo_release_ref deve casar com [A-Za-z0-9._-]{1,64} (referência curta ao termo, sem nome "
+            f"nem endereço), veio {release_ref!r}"
+        )
+
     raw_scenes = doc.get("scenes", [])  # ausente = 0 cenas (mesma mensagem de contagem)
     if not isinstance(raw_scenes, list):
         raise ScriptError("scenes deve ser uma lista de tabelas [[scenes]]")
@@ -151,4 +165,5 @@ def load_script(path: Path) -> Script:
         path=path,
         sha256=hashlib.sha256(data).hexdigest(),
         scenes=tuple(sorted(scenes, key=lambda s: s.index)),
+        photo_release_ref=release_ref,
     )

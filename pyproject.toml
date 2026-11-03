@@ -13,11 +13,10 @@ dependencies = [
 gemini = ["google-genai>=2.19.0"]
 
 [project.scripts]
-# O módulo verion.cli é criado na T4; até lá o comando `verion` existe mas não executa.
 verion = "verion.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.3"]
+dev = ["pytest>=8.3", "ruff>=0.6", "mypy>=1.11"]
 
 [build-system]
 requires = ["hatchling"]

@@ -13,3 +13,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Banco do harness (pode conter dados do cliente) e restos do ffmpeg/montagem
+*.db
+*.db-*
+.*.part*
+.*.work-*

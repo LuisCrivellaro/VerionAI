@@ -21,7 +21,8 @@ from typing import Any
 import pytest
 
 from verion import budget, cli
-from verion.errors import FfmpegError
+from verion.config import PriceTable
+from verion.errors import FfmpegError, ProviderError
 from verion.ledger import repo
 from verion.local import assembly, qc_frames
 from verion.providers import registry
@@ -83,10 +84,17 @@ class Env:
         return self.data_dir / "verion.db"
 
 
-def write_script(root: Path, name: str = "roteiro.toml", property_id: str = "casa-01") -> Path:
+def write_script(
+    root: Path,
+    name: str = "roteiro.toml",
+    property_id: str = "casa-01",
+    release_ref: str | None = "termo-001",
+) -> Path:
     photos = root / f"fotos-{name}"
     photos.mkdir(exist_ok=True)
     blocks = [f'property_id = "{property_id}"\n']
+    if release_ref is not None:
+        blocks.append(f'photo_release_ref = "{release_ref}"\n')
     for i in range(1, 13):
         (photos / f"{i:02d}.jpg").write_bytes(b"foto-ficticia")
         blocks.append(
@@ -393,6 +401,7 @@ def test_keyboard_interrupt_settles_reservation_and_exits_130(
     monkeypatch.setattr(registry, "create", lambda method, prices, client=None: InterruptingFake(prices))
     code, _, err = run_cli("run", "--script", str(env.script), "--method", "fake", "--allow-paid")
     assert code == 130 and "run_id=1" in err
+    assert "reservas liquidadas" in err and "KeyboardInterrupt:" not in err
     assert [(r.status, r.cost_brl) for r in attempts(db)] == [("error", 5.0)]
 
 
@@ -449,12 +458,17 @@ def test_authorize_phrase_uses_two_decimals_and_comma(
     assert auth_rows(env.data_dir) == 2
 
 
-@pytest.mark.parametrize("brl", ["0", "-5", "abc", "350.123", "nan", "inf", ""])
+@pytest.mark.parametrize(
+    "brl",
+    ["0", "-5", "abc", "350.123", "nan", "inf", "", "1e30", "1E+400", "１０", "1e3", "0x10", "501", "10 0", "999999999999"],
+)
 def test_authorize_rejects_invalid_amounts(
     env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]], brl: str
 ) -> None:
     monkeypatch.setattr(sys, "stdin", FakeTTY("AUTORIZO R$ 350,00\n"))
-    assert run_cli(*authorize_args(brl))[0] == 2
+    code, _, err = run_cli(*authorize_args(brl))
+    assert code == 2
+    assert "Traceback" not in err and "erro interno" not in err  # nunca "bug"
     assert auth_rows(env.data_dir) == 0
 
 
@@ -741,7 +755,8 @@ def test_qc_frames_calls_extract_on_the_attempt_clip(
     assert "2 quadros" in out
     assert str(env.data_dir / "qc" / str(attempt.id) / "sheet.jpg") in out
     assert str(env.data_dir / "qc" / str(attempt.id) / "last.jpg") in out
-    assert "cena 3" in out and str(env.script) in out  # onde achar a foto de origem
+    photo = env.root / "fotos-roteiro.toml" / "03.jpg"
+    assert f"foto de origem da cena 3: {photo}" in out
 
 
 def test_qc_frames_requires_an_ok_attempt(
@@ -767,8 +782,12 @@ def ok_attempt(env: Env, db: sqlite3.Connection, run_cli: Callable[..., tuple[in
 
 
 def test_qc_record_approved_by_human(
-    ok_attempt: int, db: sqlite3.Connection, run_cli: Callable[..., tuple[int, str, str]]
+    ok_attempt: int,
+    db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    run_cli: Callable[..., tuple[int, str, str]],
 ) -> None:
+    monkeypatch.setattr(sys, "stdin", FakeTTY(f"APROVO tentativa {ok_attempt}\n"))
     code, out, _ = run_cli(
         "qc", "record", "--attempt", str(ok_attempt), "--verdict", "aprovada", "--reviewer", "humano"
     )
@@ -868,7 +887,7 @@ def two_runs(
 def test_assemble_uses_approved_scenes_in_order_with_fallback_for_gaps(
     env: Env, two_runs: None, db: sqlite3.Connection, spy: AssembleSpy, run_cli: Callable[..., tuple[int, str, str]]
 ) -> None:
-    out_file = env.root / "saida" / "tour.mp4"
+    out_file = env.data_dir / "saida" / "tour.mp4"
     spy.short_clips = (1, 3)  # índices base 0 da lista de clipes: posições 1 e 3 = cenas 2 e 4
     code, out, _ = run_cli(
         "assemble", "--run", "1", "--fallback-run", "2", "--demo", "--out", str(out_file)
@@ -892,7 +911,7 @@ def test_assemble_uses_approved_scenes_in_order_with_fallback_for_gaps(
 def test_assemble_without_fallback_omits_and_lists_gaps(
     env: Env, two_runs: None, spy: AssembleSpy, run_cli: Callable[..., tuple[int, str, str]]
 ) -> None:
-    code, out, _ = run_cli("assemble", "--run", "1", "--out", str(env.root / "t.mp4"))
+    code, out, _ = run_cli("assemble", "--run", "1", "--out", str(env.data_dir / "t.mp4"))
     assert code == 0
     ((clips, _, demo),) = spy.calls
     assert len(clips) == 2 and demo is False
@@ -903,7 +922,7 @@ def test_assemble_with_no_approved_scene_is_exit_2(
     env: Env, two_runs: None, db: sqlite3.Connection, spy: AssembleSpy, run_cli: Callable[..., tuple[int, str, str]]
 ) -> None:
     run_id = repo.create_run(db, property_id="casa-01", method="fake", script_path="r", script_sha256="x")
-    code, _, err = run_cli("assemble", "--run", str(run_id), "--out", str(env.root / "t.mp4"))
+    code, _, err = run_cli("assemble", "--run", str(run_id), "--out", str(env.data_dir / "t.mp4"))
     assert code == 2 and "aprovada" in err
     assert spy.calls == []
 
@@ -911,7 +930,7 @@ def test_assemble_with_no_approved_scene_is_exit_2(
 def test_assemble_validates_runs(
     env: Env, two_runs: None, db: sqlite3.Connection, spy: AssembleSpy, run_cli: Callable[..., tuple[int, str, str]]
 ) -> None:
-    out_file = str(env.root / "t.mp4")
+    out_file = str(env.data_dir / "t.mp4")
     assert run_cli("assemble", "--run", "99", "--out", out_file)[0] == 2
     assert run_cli("assemble", "--run", "1", "--fallback-run", "99", "--out", out_file)[0] == 2
     assert run_cli("assemble", "--run", "1", "--fallback-run", "1", "--out", out_file)[0] == 2
@@ -925,7 +944,7 @@ def test_assemble_ffmpeg_failure_is_exit_6(
     env: Env, two_runs: None, spy: AssembleSpy, run_cli: Callable[..., tuple[int, str, str]]
 ) -> None:
     spy.error = FfmpegError("xfade falhou")
-    code, _, err = run_cli("assemble", "--run", "1", "--out", str(env.root / "t.mp4"))
+    code, _, err = run_cli("assemble", "--run", "1", "--out", str(env.data_dir / "t.mp4"))
     assert code == 6 and "xfade falhou" in err
 
 
@@ -964,7 +983,7 @@ def test_ledger_export_command(
     authorize(db, 350.0)
     run_cli("run", "--script", str(env.script), "--method", "ken-burns", "--scenes", "1")
     run_cli("run", "--script", str(env.script), "--method", "fake", "--allow-paid", "--scenes", "1")
-    out_dir = env.root / "evidence"
+    out_dir = env.data_dir / "evidence"
     code, out, _ = run_cli("ledger", "export", "--out", str(out_dir))
     assert code == 0
     for name in ("runs.jsonl", "attempts.jsonl", "scenes.jsonl", "authorizations.jsonl"):
@@ -977,6 +996,7 @@ def test_ledger_export_default_directory(
     env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
 ) -> None:
     monkeypatch.chdir(env.root)
+    assert run_cli("db", "init")[0] == 0
     code, _, _ = run_cli("ledger", "export")
     assert code == 0
     assert (env.root / "docs" / "engineering" / "evidence" / "fase0" / "attempts.jsonl").is_file()
@@ -987,3 +1007,653 @@ def test_help_exits_0(run_cli: Callable[..., tuple[int, str, str]]) -> None:
     assert code == 0 and "verion" in out
     for command in ("db", "budget", "run", "ledger", "qc", "assemble", "report"):
         assert command in out
+
+
+# =============================================================================================
+# Rodada final da T4 (revisões de código e de segurança): B1-B3, I1-I7, D1-D4
+# =============================================================================================
+
+COMMANDS_NEEDING_DB = [
+    ("budget", "show"),
+    ("report",),
+    ("ledger", "export", "--out", "{data}/export"),
+    ("ledger", "settle", "--attempt", "1", "--note", "n"),
+    ("qc", "frames", "--attempt", "1"),
+    ("qc", "record", "--attempt", "1", "--verdict", "refazer", "--reviewer", "humano", "--defect", "2:1:x"),
+    ("assemble", "--run", "1", "--out", "{data}/t.mp4"),
+]
+
+
+def pty_run(env: Env, argv: tuple[str, ...], typed: bytes) -> tuple[int, str, str]:
+    """Roda ``python -m verion.cli`` com um pseudo-TTY como stdin e ``typed`` já digitado."""
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "verion.cli", *argv],
+        stdin=slave,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_subprocess_env(env),
+        text=True,
+    )
+    os.close(slave)
+    os.write(master, typed)
+    try:
+        out, err = proc.communicate(timeout=60)
+    finally:
+        os.close(master)
+    return proc.returncode, out, err
+
+
+# --- B1: argumentos numéricos ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["99999999999999999999", "9223372036854775808", "0", "-1", "１２", "1e3", "1_0", "abc", ""])
+@pytest.mark.parametrize(
+    "template",
+    [
+        ("run", "--script", "{script}", "--method", "fake", "--dry-run", "--run", "{x}"),
+        ("ledger", "settle", "--attempt", "{x}", "--note", "n"),
+        ("qc", "frames", "--attempt", "{x}"),
+        ("qc", "record", "--attempt", "{x}", "--verdict", "refazer", "--reviewer", "humano"),
+        ("assemble", "--run", "{x}", "--out", "{data}/t.mp4"),
+        ("assemble", "--run", "1", "--fallback-run", "{x}", "--out", "{data}/t.mp4"),
+    ],
+)
+def test_ids_outside_1_to_2_63_are_usage_errors_not_bugs(
+    env: Env, run_cli: Callable[..., tuple[int, str, str]], template: tuple[str, ...], bad: str
+) -> None:
+    argv = [a.format(x=bad, script=env.script, data=env.data_dir) for a in template]
+    code, _, err = run_cli(*argv)
+    assert code == 2
+    assert "Traceback" not in err and "erro interno" not in err and "OverflowError" not in err
+
+
+def test_largest_valid_id_is_accepted_by_the_parser(env: Env, db: sqlite3.Connection, run_cli: Callable[..., tuple[int, str, str]]) -> None:
+    code, _, err = run_cli("ledger", "settle", "--attempt", str(2**63 - 1), "--note", "n")
+    assert code == 2 and "inexistente" in err  # passou do parser; falhou por não existir
+
+
+@pytest.mark.parametrize("scenes", ["１", "1_0", "+1", "1e0"])
+def test_scenes_accept_only_ascii_digits(env: Env, run_cli: Callable[..., tuple[int, str, str]], scenes: str) -> None:
+    assert run_cli("run", "--script", str(env.script), "--method", "fake", "--dry-run", "--scenes", scenes)[0] == 2
+
+
+@pytest.mark.parametrize("cost", ["1e30", "nan", "inf", "-1", "１", "1_0"])
+def test_settle_cost_rejects_exponents_and_non_ascii(
+    orphan: int, run_cli: Callable[..., tuple[int, str, str]], cost: str
+) -> None:
+    assert run_cli("ledger", "settle", "--attempt", str(orphan), "--cost-brl", cost, "--note", "n")[0] == 2
+
+
+def test_unexpected_exception_while_parsing_is_a_usage_error(
+    env: Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import argparse
+
+    def overflowing(text: str) -> int:
+        raise OverflowError("int too large")
+
+    parser = argparse.ArgumentParser(prog="verion")
+    parser.add_argument("--n", type=overflowing)
+    monkeypatch.setattr(cli, "_build_parser", lambda: parser)
+    assert cli.main(["--n", "1"]) == 2
+    assert "OverflowError" in capsys.readouterr().err
+
+
+# --- B2: a chave de API nunca sai ------------------------------------------------------------
+
+SYNTHETIC_LITERAL = "chave-sintetica-literal-0123456789"
+SYNTHETIC_AIZA = "AIzaSyDUMMY-synthetic-key_0123456789abcd"
+
+
+def leaky_message() -> str:
+    return (
+        f"HTTP 403 em https://api.example/v1/models?key={SYNTHETIC_AIZA}&alt=sse "
+        f"headers x-goog-api-key: {SYNTHETIC_LITERAL} Authorization: Bearer {SYNTHETIC_LITERAL} "
+        f"literal {SYNTHETIC_LITERAL}"
+    )
+
+
+def assert_no_key(text: str) -> None:
+    for secret in (SYNTHETIC_LITERAL, SYNTHETIC_AIZA, "AIzaSyDUMMY"):
+        assert secret not in text, secret
+
+
+def test_api_key_in_provider_error_reaches_neither_stderr_nor_database_nor_jsonl(
+    env: Env,
+    db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    run_cli: Callable[..., tuple[int, str, str]],
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", SYNTHETIC_LITERAL)
+    authorize(db, 350.0)
+
+    class Leaky(FakeAdapter):
+        def generate(self, req: SceneRequest, token: Any) -> SceneResult:
+            token.consume(self.method)
+            raise ProviderError(leaky_message(), transient=False)
+
+    monkeypatch.setattr(registry, "create", lambda method, prices, client=None: Leaky(prices))
+    code, out, err = run_cli("run", "--script", str(env.script), "--method", "fake", "--allow-paid")
+    assert code == 4
+    assert_no_key(out + err)
+    assert "[REDACTED]" in err
+
+    (row,) = attempts(db)
+    assert row.error is not None
+    assert_no_key(row.error)
+    for file in env.data_dir.glob("verion.db*"):  # banco, -wal e -shm, byte a byte
+        assert SYNTHETIC_LITERAL.encode() not in file.read_bytes(), file.name
+        assert SYNTHETIC_AIZA.encode() not in file.read_bytes(), file.name
+
+    export_dir = env.data_dir / "export"
+    assert run_cli("ledger", "export", "--out", str(export_dir))[0] == 0
+    assert_no_key("".join(p.read_text(encoding="utf-8") for p in export_dir.glob("*.jsonl")))
+
+
+def test_api_key_in_unexpected_error_and_debug_traceback_is_redacted(
+    env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", SYNTHETIC_LITERAL)
+    message = leaky_message()
+
+    def boom(method: str, prices: Any, client: object | None = None) -> SceneGenerator:
+        try:
+            raise ValueError(message)
+        except ValueError as cause:
+            raise RuntimeError(message) from cause
+
+    monkeypatch.setattr(registry, "create", boom)
+    for flags in ((), ("--debug",)):
+        code, out, err = run_cli(*flags, "run", "--script", str(env.script), "--method", "fake", "--dry-run")
+        assert code == 1
+        assert_no_key(out + err)
+    assert "Traceback" in err  # o --debug continua mostrando o traceback, só que redigido
+
+
+def test_api_key_in_notes_of_an_exception_is_redacted(
+    env: Env, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", SYNTHETIC_LITERAL)
+    authorize(db, 350.0)
+
+    class Noted(FakeAdapter):
+        def generate(self, req: SceneRequest, token: Any) -> SceneResult:
+            token.consume(self.method)
+            exc = ProviderError("falhou", transient=False)
+            exc.add_note(f"detalhe: {SYNTHETIC_LITERAL}")
+            raise exc
+
+    monkeypatch.setattr(registry, "create", lambda method, prices, client=None: Noted(prices))
+    code, out, err = run_cli("run", "--script", str(env.script), "--method", "fake", "--allow-paid")
+    assert code == 4
+    assert_no_key(out + err)
+
+
+# --- B3: o export não leva dados pessoais (via CLI) -------------------------------------------
+
+
+def test_cli_export_has_no_paths_notes_or_release_reference(
+    env: Env, db: sqlite3.Connection, stub_free: None, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    authorize(db, 350.0)
+    run_cli("run", "--script", str(env.script), "--method", "ken-burns", "--scenes", "1")
+    run_cli("run", "--script", str(env.script), "--method", "fake", "--allow-paid", "--scenes", "1")
+    out_dir = env.data_dir / "export"
+    assert run_cli("ledger", "export", "--out", str(out_dir))[0] == 0
+    blob = "".join(p.read_text(encoding="utf-8") for p in out_dir.glob("*.jsonl"))
+    for forbidden in (str(env.root), "fotos-", "termo-001", "roteiro.toml", ".mp4", "teste"):
+        assert forbidden not in blob, forbidden
+
+
+# --- I1: banco só nasce em db init, run e budget authorize -------------------------------------
+
+
+@pytest.mark.parametrize("template", COMMANDS_NEEDING_DB)
+def test_commands_do_not_create_the_database(
+    env: Env, run_cli: Callable[..., tuple[int, str, str]], template: tuple[str, ...]
+) -> None:
+    argv = [a.format(data=env.data_dir) for a in template]
+    code, _, err = run_cli(*argv)
+    assert code == 2
+    assert "banco não encontrado" in err and str(env.db) in err and "verion db init" in err
+    assert not env.data_dir.exists()  # nem o banco, nem a pasta
+
+
+def test_run_and_authorize_still_create_the_database_and_print_its_path(
+    env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]], stub_free: None
+) -> None:
+    code, out, _ = run_cli("run", "--script", str(env.script), "--method", "ken-burns", "--scenes", "1")
+    assert code == 0 and f"banco: {env.db}" in out and env.db.is_file()
+    code, out, _ = run_cli("budget", "show")
+    assert f"banco: {env.db}" in out
+    monkeypatch.setattr(sys, "stdin", FakeTTY("AUTORIZO R$ 10,00\n"))
+    code, out, _ = run_cli(*authorize_args("10"))
+    assert code == 0 and f"banco: {env.db}" in out
+
+
+def test_dry_run_creates_nothing(env: Env, run_cli: Callable[..., tuple[int, str, str]]) -> None:
+    assert run_cli("run", "--script", str(env.script), "--method", "fake", "--dry-run")[0] == 0
+    assert not env.data_dir.exists()
+
+
+def test_export_with_no_runs_refuses_to_overwrite_existing_evidence(
+    env: Env, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    out_dir = env.data_dir / "export"
+    out_dir.mkdir(parents=True)
+    evidence = out_dir / "attempts.jsonl"
+    evidence.write_text('{"projeto": "imv-001"}\n', encoding="utf-8")
+    assert run_cli("db", "init")[0] == 0  # banco vazio, p.ex. VERION_DATA_DIR errado
+    code, _, err = run_cli("ledger", "export", "--out", str(out_dir))
+    assert code == 2 and "--force" in err and "attempts.jsonl" in err
+    assert evidence.read_text(encoding="utf-8") == '{"projeto": "imv-001"}\n'  # intacto
+    assert run_cli("ledger", "export", "--out", str(out_dir), "--force")[0] == 0
+    assert evidence.read_text(encoding="utf-8") == ""
+
+
+def test_export_with_no_runs_and_no_previous_export_is_fine(
+    env: Env, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    run_cli("db", "init")
+    assert run_cli("ledger", "export", "--out", str(env.data_dir / "export"))[0] == 0
+
+
+# --- I2: --out confinado ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def repo_cwd(env: Env, monkeypatch: pytest.MonkeyPatch) -> Path:
+    cwd = env.root / "repo"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    return cwd
+
+
+def test_assemble_out_must_be_inside_data_dir_or_evidence(
+    env: Env, two_runs: None, spy: AssembleSpy, repo_cwd: Path, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    other = env.root / "dados-de-outro-lugar"
+    (env.data_dir / "link").symlink_to(other.with_name("alvo"), target_is_directory=True)
+    (env.root / "alvo").mkdir()
+    refused = [
+        env.root / "fora.mp4",
+        Path("../.git/config"),
+        env.data_dir / "verion.db",
+        env.data_dir / "verion.db-wal",
+        env.data_dir / ".git" / "x.mp4",
+        env.data_dir / ".claude" / "x.mp4",
+        env.data_dir / ".." / "fora.mp4",
+        env.data_dir / "link" / "x.mp4",  # link simbólico que escapa da pasta
+        Path("docs/engineering/evidence/../../../x.mp4"),
+        Path("/etc/passwd"),
+    ]
+    for target in refused:
+        code, _, err = run_cli("assemble", "--run", "1", "--out", str(target), "--force")
+        assert code == 2, target
+        assert "Traceback" not in err
+    assert spy.calls == []
+    assert env.db.is_file()  # o banco sobreviveu
+
+
+def test_assemble_out_allowed_locations(
+    env: Env, two_runs: None, spy: AssembleSpy, repo_cwd: Path, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    assert run_cli("assemble", "--run", "1", "--out", str(env.data_dir / "sub" / "t.mp4"))[0] == 0
+    assert run_cli("assemble", "--run", "1", "--out", "docs/engineering/evidence/demo/t.mp4")[0] == 0
+    assert len(spy.calls) == 2
+
+
+def test_assemble_refuses_existing_output_without_force(
+    env: Env, two_runs: None, spy: AssembleSpy, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    target = env.data_dir / "t.mp4"
+    target.write_bytes(b"video antigo")
+    code, _, err = run_cli("assemble", "--run", "1", "--out", str(target))
+    assert code == 2 and "--force" in err and spy.calls == []
+    assert run_cli("assemble", "--run", "1", "--out", str(target), "--force")[0] == 0
+    assert len(spy.calls) == 1
+    assert run_cli("assemble", "--run", "1", "--out", str(env.data_dir), "--force")[0] == 2  # uma pasta
+
+
+def test_export_out_is_confined_too(
+    env: Env, repo_cwd: Path, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    run_cli("db", "init")
+    for target in (
+        env.root / "fora",
+        Path("../.git/hooks"),
+        env.data_dir / "verion.db",
+        env.data_dir / ".git" / "x",
+        Path("/proc/self"),
+    ):
+        assert run_cli("ledger", "export", "--out", str(target), "--force")[0] == 2, target
+    assert run_cli("ledger", "export", "--out", "docs/engineering/evidence/fase0")[0] == 0
+
+
+# --- I3: teto de R$ 500 ----------------------------------------------------------------------
+
+
+def seed_authorization_at(env: Env, amount: float, created_at: str) -> None:
+    raw = sqlite3.connect(env.db)
+    try:
+        raw.execute(
+            "INSERT INTO authorizations (amount_brl, reference, created_at) VALUES (?, 'semente', ?)",
+            (amount, created_at),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def freeze_now(monkeypatch: pytest.MonkeyPatch, iso: str) -> None:
+    from datetime import UTC, datetime
+
+    monkeypatch.setattr(cli, "_utcnow", lambda: datetime.fromisoformat(iso).replace(tzinfo=UTC))
+
+
+def authorize_typed(
+    monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]], brl: str, ref: str = "STATE.md"
+) -> tuple[int, str, str]:
+    amount = f"{float(brl.replace(',', '.')):.2f}".replace(".", ",")
+    monkeypatch.setattr(sys, "stdin", FakeTTY(f"AUTORIZO R$ {amount}\n"))
+    return run_cli("budget", "authorize", "--brl", brl, "--ref", ref)
+
+
+def test_authorize_caps_a_single_authorization_at_500(
+    env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    code, _, err = authorize_typed(monkeypatch, run_cli, "500.01")
+    assert code == 2 and "500" in err
+    assert auth_rows(env.data_dir) == 0
+    assert authorize_typed(monkeypatch, run_cli, "500")[0] == 0
+
+
+def test_authorize_caps_the_calendar_month_in_sao_paulo(
+    env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    freeze_now(monkeypatch, "2026-11-20T12:00:00")
+    assert authorize_typed(monkeypatch, run_cli, "300")[0] == 0
+    code, _, err = authorize_typed(monkeypatch, run_cli, "300")
+    assert code == 2 and "teto" in err and "R$ 300,00" in err
+    assert auth_rows(env.data_dir) == 1
+    assert authorize_typed(monkeypatch, run_cli, "200")[0] == 0  # 500 exatos cabem
+    assert authorize_typed(monkeypatch, run_cli, "0.01")[0] == 2
+    assert auth_rows(env.data_dir) == 2
+    freeze_now(monkeypatch, "2026-12-05T12:00:00")  # mês novo: o teto zera
+    assert authorize_typed(monkeypatch, run_cli, "500")[0] == 0
+
+
+def test_month_boundary_uses_sao_paulo_time_not_utc(
+    env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    run_cli("db", "init")
+    seed_authorization_at(env, 400.0, "2026-12-01T01:00:00Z")  # 30/11 22:00 em São Paulo: conta em novembro
+    seed_authorization_at(env, 450.0, "2026-11-01T02:00:00Z")  # 31/10 23:00 em São Paulo: conta em outubro
+    freeze_now(monkeypatch, "2026-11-20T12:00:00")
+    assert authorize_typed(monkeypatch, run_cli, "100.01")[0] == 2  # novembro já tem 400
+    assert authorize_typed(monkeypatch, run_cli, "100")[0] == 0
+
+
+def test_authorize_strips_control_and_ansi_characters_from_the_reference(
+    env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    code, out, _ = authorize_typed(monkeypatch, run_cli, "10", ref="STATE.md\x1b[31m\nlinha2\x07\u202e fim")
+    assert code == 0
+    assert "\x1b" not in out and "\x07" not in out and "\u202e" not in out
+    ((_, _, reference, _),) = [row for row in _auth_rows(env)]
+    assert reference == "STATE.md[31m linha2 fim"
+    assert authorize_typed(monkeypatch, run_cli, "10", ref="\x1b\x07\n")[0] == 2  # vazia depois do filtro
+
+
+def _auth_rows(env: Env) -> list[tuple[int, float, str, str]]:
+    conn = repo.connect(env.db, create=False)
+    try:
+        return repo.list_authorizations(conn)
+    finally:
+        conn.close()
+
+
+# --- I4: aprovar exige TTY e frase ------------------------------------------------------------
+
+
+def test_qc_approval_without_tty_is_refused_and_writes_nothing(
+    ok_attempt: int, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"APROVO tentativa {ok_attempt}\n"))  # frase certa, sem TTY
+    code, _, err = run_cli("qc", "record", "--attempt", str(ok_attempt), "--verdict", "aprovada", "--reviewer", "humano")
+    assert code == 2 and "TTY" in err
+    assert repo.get_qc(db, ok_attempt) is None
+
+
+def test_qc_approval_with_wrong_phrase_is_refused(
+    ok_attempt: int, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    for wrong in ("sim\n", "APROVO tentativa 2\n", "aprovo tentativa 1\n", "APROVO\n", ""):
+        monkeypatch.setattr(sys, "stdin", FakeTTY(wrong))
+        code, _, _ = run_cli("qc", "record", "--attempt", str(ok_attempt), "--verdict", "aprovada", "--reviewer", "humano")
+        assert code == 2, wrong
+    assert repo.get_qc(db, ok_attempt) is None
+
+
+def test_qc_refazer_and_rejeitada_still_work_without_tty(
+    ok_attempt: int, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    code, _, _ = run_cli(
+        "qc", "record", "--attempt", str(ok_attempt), "--verdict", "refazer", "--reviewer", "humano", "--defect", "2:1:x"
+    )
+    assert code == 0
+    qc = repo.get_qc(db, ok_attempt)
+    assert qc is not None and qc.verdict == "refazer"
+
+
+def test_qc_agent_approval_is_refused_without_prompting(
+    ok_attempt: int, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", FakeTTY(""))
+    code, out, err = run_cli("qc", "record", "--attempt", str(ok_attempt), "--verdict", "aprovada", "--reviewer", "agente")
+    assert code == 2 and "humano" in err and "APROVO" not in out
+
+
+def test_qc_approval_in_a_real_pty(
+    env: Env, ok_attempt: int, db: sqlite3.Connection
+) -> None:
+    argv = ("qc", "record", "--attempt", str(ok_attempt), "--verdict", "aprovada", "--reviewer", "humano")
+    code, _, err = pty_run(env, argv, f"APROVO tentativa {ok_attempt + 1}\n".encode())
+    assert code == 2, err
+    assert repo.get_qc(db, ok_attempt) is None
+    code, out, err = pty_run(env, argv, f"APROVO tentativa {ok_attempt}\n".encode())
+    assert code == 0, err
+    qc = repo.get_qc(db, ok_attempt)
+    assert qc is not None and (qc.verdict, qc.reviewer) == ("aprovada", "humano")
+    assert f"APROVO tentativa {ok_attempt}" in out
+
+
+def test_qc_approval_without_tty_in_a_real_process(env: Env, ok_attempt: int, db: sqlite3.Connection) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "verion.cli", "qc", "record", "--attempt", str(ok_attempt),
+         "--verdict", "aprovada", "--reviewer", "humano"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, env=_subprocess_env(env), timeout=60, check=False,
+    )  # fmt: skip
+    assert proc.returncode == 2 and "TTY" in proc.stderr
+    assert repo.get_qc(db, ok_attempt) is None
+
+
+# --- I5: autorização das fotos (LGPD) --------------------------------------------------------
+
+
+def test_third_party_set_is_the_documented_one() -> None:
+    assert cli.THIRD_PARTY_PHOTO_METHODS >= {"veo-3.1-fast", "gemini-omni-1.1-flash", "kling-3.0"}
+
+
+@pytest.mark.parametrize("method", ["gemini-omni-1.1-flash", "veo-3.1-fast"])
+def test_third_party_method_without_release_ref_is_refused(
+    env: Env, db: sqlite3.Connection, run_cli: Callable[..., tuple[int, str, str]], method: str
+) -> None:
+    authorize(db, 350.0)
+    script = write_script(env.root, "sem-termo.toml", release_ref=None)
+    code, _, err = run_cli("run", "--script", str(script), "--method", method, "--allow-paid")
+    assert code == 2 and "photo_release_ref" in err
+    assert repo.list_runs(db) == [] and attempts(db) == []  # nenhuma foto saiu, nenhum run
+
+
+def test_dry_run_of_third_party_method_does_not_need_the_ref(env: Env, run_cli: Callable[..., tuple[int, str, str]]) -> None:
+    script = write_script(env.root, "sem-termo.toml", release_ref=None)
+    assert run_cli("run", "--script", str(script), "--method", "gemini-omni-1.1-flash", "--dry-run")[0] == 0
+
+
+def test_local_method_does_not_need_the_ref(
+    env: Env, stub_free: None, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    script = write_script(env.root, "sem-termo.toml", release_ref=None)
+    assert run_cli("run", "--script", str(script), "--method", "ken-burns", "--scenes", "1")[0] == 0
+
+
+def test_release_ref_is_recorded_in_the_run_before_any_photo_is_sent(
+    env: Env, db: sqlite3.Connection, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    # sem autorização de gasto: a trava bloqueia a cena 1, mas o run já nasceu com a referência
+    code, _, err = run_cli("run", "--script", str(env.script), "--method", "gemini-omni-1.1-flash", "--allow-paid")
+    assert code == 3 and "run_id=1" in err
+    assert repo.get_run(db, 1).notes == "photo_release_ref=termo-001"
+    assert attempts(db) == []
+
+
+def test_release_ref_is_recorded_once_when_continuing_a_run(
+    env: Env, db: sqlite3.Connection, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    authorize(db, 350.0)
+    base = ("run", "--script", str(env.script), "--method", "fake", "--allow-paid")
+    run_cli(*base, "--scenes", "1")
+    run_cli(*base, "--run", "1", "--scenes", "2")
+    assert repo.get_run(db, 1).notes == "photo_release_ref=termo-001"
+
+
+def test_invalid_release_ref_in_script_is_exit_2(env: Env, run_cli: Callable[..., tuple[int, str, str]]) -> None:
+    script = write_script(env.root, "ruim.toml", release_ref="termo da Maria")
+    code, _, err = run_cli("run", "--script", str(script), "--method", "fake", "--dry-run")
+    assert code == 2 and "photo_release_ref" in err
+
+
+def test_example_script_documents_neutral_property_id_and_release_ref() -> None:
+    text = (Path(cli.__file__).parents[2] / "examples" / "roteiro.example.toml").read_text(encoding="utf-8")
+    assert "imv-001" in text and "photo_release_ref" in text
+
+
+# --- I6: ambiente e arquivo não são bug -------------------------------------------------------
+
+
+def test_data_dir_that_is_a_file_is_exit_2(
+    env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    blocker = env.root / "arquivo"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("VERION_DATA_DIR", str(blocker))
+    code, _, err = run_cli("db", "init")
+    assert code == 2 and "ambiente ou arquivo" in err and "erro interno" not in err
+
+
+def test_corrupted_database_is_exit_2(env: Env, run_cli: Callable[..., tuple[int, str, str]]) -> None:
+    env.data_dir.mkdir()
+    env.db.write_bytes(b"isto nao e um banco sqlite " * 50)
+    code, _, err = run_cli("budget", "show")
+    assert code == 2 and "ambiente ou arquivo" in err and "erro interno" not in err
+
+
+def test_export_to_unwritable_target_is_exit_2(
+    env: Env, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    run_cli("db", "init")
+    blocker = env.data_dir / "ocupado"
+    blocker.write_text("x", encoding="utf-8")
+    code, _, err = run_cli("ledger", "export", "--out", str(blocker / "sub"))
+    assert code == 2 and "erro interno" not in err
+
+
+def test_broken_pipe_on_stdout_is_exit_2(
+    env: Env, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Closed:
+        def write(self, text: str) -> int:
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self) -> None:
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(sys, "stdout", Closed())
+    code = cli.main(["report"])
+    err = capsys.readouterr().err
+    assert code == 2 and "erro interno" not in err
+
+
+# --- I7: SIGTERM -----------------------------------------------------------------------------
+
+
+def test_sigterm_settles_the_reservation_and_exits_130(
+    env: Env, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    import signal
+
+    authorize(db, 350.0)
+    before = signal.getsignal(signal.SIGTERM)
+
+    class Terminated(FakeAdapter):
+        def generate(self, req: SceneRequest, token: Any) -> SceneResult:
+            token.consume(self.method)
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise AssertionError("o handler deveria ter interrompido")  # pragma: no cover
+
+    monkeypatch.setattr(registry, "create", lambda method, prices, client=None: Terminated(prices))
+    code, _, err = run_cli("run", "--script", str(env.script), "--method", "fake", "--allow-paid")
+    assert code == 130
+    assert "run_id=1" in err and "reservas liquidadas" in err and "KeyboardInterrupt:" not in err
+    assert [(r.status, r.cost_brl) for r in attempts(db)] == [("error", 5.0)]
+    assert signal.getsignal(signal.SIGTERM) == before  # o handler foi restaurado
+
+
+def test_interrupt_before_any_run_does_not_claim_settled_reservations(
+    env: Env, monkeypatch: pytest.MonkeyPatch, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    def interrupted(path: Path) -> PriceTable:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "load_prices", interrupted)
+    code, _, err = run_cli("run", "--script", str(env.script), "--method", "fake", "--dry-run")
+    assert code == 130 and "interrompido" in err
+    assert "liquidadas" not in err and "run_id" not in err
+
+
+# --- D2 e D4 ---------------------------------------------------------------------------------
+
+
+def test_assemble_checks_every_approved_clip_exists_and_names_the_scene(
+    env: Env, two_runs: None, db: sqlite3.Connection, spy: AssembleSpy, run_cli: Callable[..., tuple[int, str, str]]
+) -> None:
+    clip = repo.get_attempt(db, 3)
+    assert clip is not None and clip.clip_path is not None
+    Path(clip.clip_path).unlink()  # cena 3 do run 1
+    code, _, err = run_cli("assemble", "--run", "1", "--out", str(env.data_dir / "t.mp4"))
+    assert code == 2 and "cena 3" in err and spy.calls == []
+
+
+def test_gitignore_covers_databases_and_ffmpeg_leftovers() -> None:
+    lines = (Path(cli.__file__).parents[2] / ".gitignore").read_text(encoding="utf-8").splitlines()
+    for pattern in ("*.db", "*.db-*", ".*.part*", ".*.work-*"):
+        assert pattern in lines, pattern
+
+
+def test_interrupt_message_claims_settlement_only_when_confirmed(capsys: pytest.CaptureFixture[str]) -> None:
+    def report(**attrs: object) -> str:
+        exc = KeyboardInterrupt()
+        for name, value in attrs.items():
+            setattr(exc, name, value)
+        cli._report_interrupt(exc)
+        return capsys.readouterr().err
+
+    assert "reservas liquidadas" in report(verion_run_id=3, verion_pending=0)
+    unconfirmed = report(verion_run_id=3, verion_pending=None)
+    assert "liquidadas" not in unconfirmed and "não foi possível confirmar" in unconfirmed
+    still_pending = report(verion_run_id=3, verion_pending=2)
+    assert "liquidadas" not in still_pending and "2 tentativa(s) pending" in still_pending and "ledger settle" in still_pending
+    assert "liquidadas" not in report()

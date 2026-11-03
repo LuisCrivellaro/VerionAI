@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from verion import errors
+from verion.errors import InputError
 from verion.ledger import repo
 from verion.ledger.repo import Defect
 
@@ -615,3 +617,47 @@ def test_db_refuses_agent_approval_even_with_raw_sql(conn: sqlite3.Connection) -
 def test_seed_helper_signature_is_stable(authorize: Callable[[float], int]) -> None:
     """A fixture ``authorize`` (conftest) semeia pelo repo; conferida aqui por ser contrato das demais tarefas."""
     assert authorize(10.0) > 0
+
+
+# --- T4 rodada final: abrir sem criar, permissões e notas ----------------------------------
+
+
+def test_connect_without_create_refuses_missing_database(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "verion.db"
+    with pytest.raises(InputError, match="verion db init"):
+        repo.connect(path, create=False)
+    assert not path.exists() and not path.parent.exists()  # nada foi criado
+
+
+def test_connect_without_create_opens_existing_database(tmp_path: Path) -> None:
+    path = tmp_path / "verion.db"
+    repo.connect(path).close()
+    conn = repo.connect(path, create=False)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == repo.SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_connect_creates_private_database_and_folder(tmp_path: Path) -> None:
+    path = tmp_path / "novo" / "verion.db"
+    conn = repo.connect(path)
+    try:
+        repo.create_run(conn, property_id="imv-001", method="ken-burns", script_path="r", script_sha256="x")
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        for side in path.parent.glob("verion.db-*"):  # -wal e -shm herdam as permissões do banco
+            assert stat.S_IMODE(side.stat().st_mode) == 0o600, side.name
+    finally:
+        conn.close()
+
+
+def test_add_note_appends_lines(conn: sqlite3.Connection) -> None:
+    run = repo.create_run(conn, property_id="imv-001", method="ken-burns", script_path="r", script_sha256="x")
+    repo.add_note(conn, run, "primeira")
+    repo.add_note(conn, run, " segunda ")
+    assert repo.get_run(conn, run).notes == "primeira\nsegunda"
+    with pytest.raises(InputError):
+        repo.add_note(conn, 999, "x")
+    with pytest.raises(InputError):
+        repo.add_note(conn, run, "  ")

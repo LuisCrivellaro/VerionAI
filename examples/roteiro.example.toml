@@ -2,7 +2,11 @@
 # (gradiente + moldura), geradas só para testes: não representam nenhum imóvel.
 #
 # Regras (verion.script.load_script):
-#   - property_id: id neutro, ^[a-z0-9-]{1,32}$ (nunca endereço, nome ou telefone);
+#   - property_id: CÓDIGO sem relação com o imóvel, ^[a-z0-9-]{1,32}$ (ex.: imv-001). Nunca endereço, nome,
+#     telefone, bairro ou apelido: ele vai para o banco e para o export JSONL versionado;
+#   - photo_release_ref (opcional aqui, OBRIGATÓRIO para métodos que enviam a foto a terceiros: Veo, Gemini
+#     Omni, Kling, Wan): referência curta ao termo de uso das fotos, [A-Za-z0-9._-]{1,64}, sem nome de pessoa
+#     (ex.: termo-0001). A CLI a registra no run antes de enviar qualquer foto;
 #   - exatamente 12 [[scenes]], index 1..12 sem repetição;
 #   - photo: caminho relativo a ESTA pasta (ou absoluto); o arquivo precisa existir;
 #   - camera: push-in | pull-out | pan-left | pan-right | static;
@@ -11,7 +15,8 @@
 #     na foto (regra de fidelidade visual do VÉRION).
 # Fotos reais de imóveis ficam em data/ (fora do git), com autorização escrita do proprietário.
 
-property_id = "exemplo-sintetico"
+property_id = "exemplo-sintetico"   # exemplo sintético; para imóveis reais use um código como imv-001
+# photo_release_ref = "termo-0001"   # descomente (com a referência real) antes de usar um método pago
 
 [[scenes]]
 index = 1

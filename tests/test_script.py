@@ -363,3 +363,26 @@ def test_example_prompts_describe_only_camera_motion() -> None:
     script = load_script(REPO_ROOT / "examples" / "roteiro.example.toml")
     for scene in script.scenes:
         assert "não adicionar" in scene.prompt.lower(), scene.index
+
+
+# --- photo_release_ref (LGPD, T4 rodada final) ----------------------------------------------
+
+
+def test_photo_release_ref_is_optional_and_defaults_to_none(tmp_path: Path) -> None:
+    assert load_script(write_script(tmp_path)).photo_release_ref is None
+
+
+@pytest.mark.parametrize("ref", ["termo-0001", "A.b_c-9", "x" * 64])
+def test_photo_release_ref_is_read(tmp_path: Path, ref: str) -> None:
+    script = load_script(write_script(tmp_path, extra_top=f'photo_release_ref = "{ref}"\n'))
+    assert script.photo_release_ref == ref
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ['""', '"x' + 'x' * 64 + '"', '"termo da Maria"', '"Rua das Flores 123"', '"a/b"', "42", "true", '"termo\\u00e9"'],
+)
+def test_photo_release_ref_rejects_invalid_values(tmp_path: Path, literal: str) -> None:
+    path = write_script(tmp_path, extra_top=f"photo_release_ref = {literal}\n")
+    with pytest.raises(ScriptError, match="photo_release_ref"):
+        load_script(path)

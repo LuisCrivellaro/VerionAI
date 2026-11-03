@@ -870,3 +870,28 @@ def test_exception_carries_run_id(
         run(RaisingAdapter(prices, KeyboardInterrupt()))
     assert getattr(info.value, "verion_run_id", None) == only_run_id(conn)
     assert any(f"run_id={only_run_id(conn)}" in note for note in getattr(info.value, "__notes__", []))
+
+
+# --- redação de segredos no ledger (T4 rodada final, B2) -------------------------------------
+
+
+def test_error_text_in_ledger_never_contains_the_api_key(
+    conn: sqlite3.Connection,
+    prices: PriceTable,
+    authorize: Callable[[float], int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "chave-sintetica-literal-0123456789"
+    monkeypatch.setenv("GEMINI_API_KEY", key)
+    authorize(100.0)
+
+    class Leaky(FakeAdapter):
+        def generate(self, req: SceneRequest, token: budget.SpendToken) -> SceneResult:
+            token.consume(self.method)
+            raise ProviderError(f"HTTP 400 em https://x.example/v1?key={key}", transient=False)
+
+    with pytest.raises(ProviderError):
+        run_scenes(conn, make_script(tmp_path), Leaky(prices), prices, allow_paid=True, data_dir=tmp_path)
+    (row,) = repo.list_attempts(conn)
+    assert row.error is not None and key not in row.error and "[REDACTED]" in row.error

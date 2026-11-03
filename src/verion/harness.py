@@ -31,6 +31,7 @@ from verion.config import PriceTable
 from verion.errors import AttemptRuleError, EstimateInvalid, InputError, ProviderError
 from verion.ledger import repo
 from verion.providers.base import SceneGenerator, SceneRequest
+from verion.redact import redact_secrets
 from verion.script import Script
 
 __all__ = ["RunSummary", "run_scenes"]
@@ -56,7 +57,8 @@ class RunSummary:
 
 
 def _describe(exc: BaseException) -> str:
-    text = f"{type(exc).__name__}: {exc}"
+    """Texto da exceção para o ledger. Passa por ``redact_secrets``: uma chave nunca chega ao banco."""
+    text = redact_secrets(f"{type(exc).__name__}: {exc}")
     return text if len(text) <= _MAX_ERROR_CHARS else text[: _MAX_ERROR_CHARS - 1] + "…"
 
 

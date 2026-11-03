@@ -1,5 +1,21 @@
 # Decisões (a mais recente no topo)
 
+## 2026-11-02 · ADR-010 · CLI: teto de autorização, export por lista de permitidos, termo das fotos, aprovação humana com TTY
+- **Teto de autorização:** `budget authorize` aceita no máximo R$ 500 por autorização e R$ 500 acumulados no mês calendário (America/Sao_Paulo), o teto do brief. Subir exige decisão do usuário e mudança de código.
+- **Export JSONL:**
+  - Sai por **lista de permitidos**: só campos estruturados (`erro` como classe e `erro_codigo`, defeitos com tipo, segundo e gravidade, `motivo_codigo`).
+  - Notas, motivos em texto, referências, caminhos e job id ficam **só no banco local**.
+  - A spec 3.8 e o registro da skill `verion-fidelity-qc` valem para o banco local. O export é um subconjunto.
+- **Termo das fotos:** `photo_release_ref` é obrigatório no roteiro para métodos que enviam foto a terceiros (Omni, Veo, Kling, Wan). A referência é gravada no run antes de qualquer envio. O `property_id` deve ser um código sem relação com o imóvel (`imv-001`).
+- **Aprovação humana:** aprovar QC como humano exige TTY e a frase `APROVO tentativa N`. Agentes só gravam `refazer` ou `rejeitada`.
+- **Banco:** só `db init`, `run` e `authorize` o criam. `--out` fica confinado a `VERION_DATA_DIR` ou `docs/engineering/evidence/`.
+- **Segredos:** `verion.redact.redact_secrets` é a redação central, aplicada no harness, na CLI e no export.
+- **Interrupção:** código 130 para Ctrl-C e SIGTERM, com liquidação. Código 2 para erro de ambiente ou arquivo. Código 1 só para bug, com uma linha (traceback com `--debug`, redigido).
+- **Proposta NÃO aplicada (decisão do usuário):** regra `permissions.deny` no `.claude/settings.json`.
+  - Bloquearia `Bash(*budget authorize*)`, `Bash(*--reviewer humano*)`, `Bash(*verion.db*)`, `Edit/Write(data/**)` e `Edit/Write(.claude/settings*.json)`.
+  - É atrito, não fronteira: a barreira real continua sendo a chave fora do ambiente do agente.
+  - A sintaxe precisa ser conferida em `/permissions`.
+
 ## 2026-11-02 · ADR-009 · Gemini Omni como provedor pago principal; regras de dinheiro dos adaptadores
 - **Veo descontinuado:** a documentação oficial dá o `veo-3.1-fast-generate-preview` como desligado desde 22/10/2026, e o substituto indicado é o `gemini-omni-1.1-flash`.
 - **Provedor principal da Fase 0:** o Omni. O adaptador do Veo fica no código, mas só é usado se um ID GA confirmado for configurado.

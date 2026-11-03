@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -115,11 +116,27 @@ def _now() -> str:
 # --- conexão e transações -------------------------------------------------------------------
 
 
-def connect(path: Path | str) -> sqlite3.Connection:
-    """Abre (e cria, se preciso) o banco. ``SchemaMismatch`` se ``user_version`` não for 0 nem 1."""
+def connect(path: Path | str, *, create: bool = True) -> sqlite3.Connection:
+    """Abre o banco. ``create=True`` (padrão) cria pasta (0700) e arquivo (0600) e aplica o esquema se preciso.
+
+    Com ``create=False`` o banco precisa existir (``mode=rw``): ausente → ``InputError``, sem criar nada.
+    ``SchemaMismatch`` se ``user_version`` não for 0 nem 1. As permissões restritas valem também para os
+    arquivos ``-wal``/``-shm``, que o SQLite cria com as permissões do banco.
+    """
     db_path = Path(path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, isolation_level=None)  # transações explícitas
+    if create:
+        db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not db_path.exists():
+            os.close(os.open(db_path, os.O_CREAT | os.O_RDWR, 0o600))  # permissão fixada antes do 1º uso
+        conn = sqlite3.connect(db_path, isolation_level=None)  # transações explícitas
+    else:
+        uri = f"{db_path.resolve().as_uri()}?mode=rw"
+        try:
+            conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+        except sqlite3.OperationalError as exc:
+            raise InputError(
+                f"banco não encontrado em {db_path} ({exc}); rode `verion db init`"
+            ) from exc
     try:
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA foreign_keys = ON")
@@ -180,6 +197,18 @@ def create_run(
     )
     assert cur.lastrowid is not None
     return cur.lastrowid
+
+
+def add_note(conn: sqlite3.Connection, run_id: int, note: str) -> None:
+    """Acrescenta uma linha a ``runs.notes`` (sem mudar o esquema). ``InputError`` se o run não existir."""
+    if not note or not note.strip():
+        raise InputError("nota vazia")
+    cur = conn.execute(
+        "UPDATE runs SET notes = CASE WHEN notes = '' THEN ?1 ELSE notes || char(10) || ?1 END WHERE id = ?2",
+        (note.strip(), run_id),
+    )
+    if cur.rowcount != 1:
+        raise InputError(f"run inexistente: {run_id}")
 
 
 def finish_run(conn: sqlite3.Connection, run_id: int) -> None:

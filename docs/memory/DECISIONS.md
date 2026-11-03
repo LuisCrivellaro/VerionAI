@@ -1,5 +1,16 @@
 # Decisões (a mais recente no topo)
 
+## 2026-11-02 · ADR-011 · Decisões do usuário: sem gasto por ora, só Gemini Omni, trava de permissões aplicada
+- **Orçamento:** nenhuma chamada paga por enquanto. A Fase 0 começa só com os métodos gratuitos (Ken Burns e parallax).
+- **Imóveis:** o usuário tem de 1 a 3 imóveis com termo de uso das fotos. Vai anexar as fotos e o código do termo (`photo_release_ref`).
+- **Provedor pago:** só o Gemini Omni. T10 (Kling) e T11 (Wan) ficam **fora do escopo** até nova decisão.
+- **Trava de permissões aplicada** em `.claude/settings.json` (`permissions.deny`):
+  - comandos com `budget authorize`, `--reviewer humano` e `GEMINI_API_KEY`;
+  - `printenv`;
+  - edição de `data/**` e `.claude/settings*.json`;
+  - leitura de `.env*`.
+- **Validação da trava:** o `claude doctor` validou a sintaxe; as regras `Write(...)` foram removidas porque `Edit(...)` já cobre todas as ferramentas de edição. Na sessão em que foi criada, um teste com `echo` **não foi bloqueado**, porque as regras de projeto são lidas no início da sessão. **Pendente:** confirmar o bloqueio numa sessão nova.
+
 ## 2026-11-02 · ADR-010 · CLI: teto de autorização, export por lista de permitidos, termo das fotos, aprovação humana com TTY
 - **Teto de autorização:** `budget authorize` aceita no máximo R$ 500 por autorização e R$ 500 acumulados no mês calendário (America/Sao_Paulo), o teto do brief. Subir exige decisão do usuário e mudança de código.
 - **Export JSONL:**

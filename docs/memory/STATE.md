@@ -20,7 +20,13 @@ Atualizado: 2026-11-02
 - [x] **T4 (CLI `verion`, relatório, export) concluída e aprovada** após revisão de código + segurança (evidência 13, ADR-010). **1111 testes verdes** (~93 s), ruff e mypy limpos.
 - [x] **T12 (aceitação ponta a ponta) concluída** (evidência 14): nível padrão sempre (1124 passed, 13 skipped, ~107 s); fluxo completo opt-in com `VERION_E2E_FULL=1` (26 passed, ~122 s). Nenhum bug de produção.
 - [x] **HARNESS DA FASE 0 CONCLUÍDO SEM CHAMADAS PAGAS** (T1–T9, T12; T10 Kling e T11 Wan bloqueadas por decisão do usuário).
-- [ ] **PRÓXIMO PASSO: decisões do usuário** (lista abaixo) para iniciar a Fase 0 real: autorizar orçamento, fornecer 3 imóveis com termo de fotos, liberar `generativelanguage.googleapis.com` no proxy, colocar `GEMINI_API_KEY` no ambiente (pelo próprio usuário), confirmar preço oficial do Omni em 1080p. Antes da 1ª chamada paga: rodar `VERION_E2E_FULL=1` e anexar a saída como evidência. Opcional: merge de `setup/agent-team` em `main`.
+- [x] Decisões do usuário registradas (ADR-011): sem gasto por ora; só Gemini Omni (T10/T11 fora); trava de permissões aplicada.
+- [ ] **PRÓXIMO PASSO (retomar em 2026-11-03):**
+  1. Numa sessão nova, confirmar que a trava bloqueia (ex.: `echo budget authorize` deve ser negado).
+  2. Usuário anexa fotos de 1–3 imóveis + código do termo; supervisor monta o roteiro (`property_id` tipo `imv-001`, fotos fora do git em `data/`).
+  3. Rodar `ken-burns` nas fotos reais, gerar quadros de QC e montar o vídeo; usuário aprova no terminal (`APROVO tentativa N`).
+  4. Parallax em fotos reais precisa de mapa de profundidade: avaliar modelo com licença comercial (Depth Anything V2 Small, Apache-2.0 — hipótese; Hugging Face bloqueado pelo proxy).
+  5. Chamada paga do Omni só após autorização futura do usuário.
 - [ ] Depois: {T3, T5, T8, T9} → {T6, T7} → T4 → T12. T10/T11 bloqueadas por decisão do usuário.
 - [ ] Implementação do harness (registro de custos, Ken Burns e 2,5D locais, adaptadores com mock)
 

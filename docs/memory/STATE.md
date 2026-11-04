@@ -6,9 +6,9 @@ Atualizado: 2026-11-03
 **Fase 0 — validação audiovisual**: ferramenta (harness) pronta e testada sem gasto; validação com imóveis reais aguarda decisões do usuário.
 
 **Ferramenta principal de vídeo (ADR-013, 03/11):** Open-Higgsfield-AI (fork Autom8AI) com kie.ai (Seedance 2.0 / Kling 3.0), usada manualmente na máquina do usuário. Ken Burns e parallax continuam como fallback gratuito.
-**Próximo passo imediato:** revisar o roteiro POV preparado com as fotos recebidas e aguardar autorização explícita para o piloto no OpenArt (30 créditos), além da referência do termo das fotos. Gerar com kie.ai também exige chave própria e autorização de gasto registrada abaixo.
+**Próximo passo imediato:** executar o único piloto OpenArt autorizado pelo usuário nesta conversa (30 créditos, PixVerse V6, 3 s, 540p, sem áudio) e avaliar o resultado. A referência do termo das fotos continua pendente para uso comercial/publicação. Gerar com kie.ai também exige chave própria e autorização de gasto registrada abaixo.
 
-**Preparação de teste POV com OpenArt (pedido posterior do usuário):** recebidos oito prints; 46 fotos extraídas sem alteração dos pixels, identificadas e organizadas em pacote local privado, fora do git. Sala/cozinha e sala/quarto têm conexão visual; limiar externo, localização do acesso ao banheiro e retorno ao jardim exigem cortes. O usuário quer câmera em primeira pessoa. OpenArt MCP está acessível e aceitou a referência da sala com o vão do quarto aberto. Teste preparado: PixVerse V6, `image2video`, um clipe de 3 s, 540p, sem áudio; cotação de 30 créditos. **Nenhuma geração enviada; consumo de créditos aguarda autorização explícita.** A referência do termo das fotos ainda não foi informada. Este é um experimento solicitado; não substitui o ADR-013 nem libera gastos.
+**Preparação de teste POV com OpenArt (pedido posterior do usuário):** recebidos oito prints; 46 fotos extraídas sem alteração dos pixels, identificadas e organizadas em pacote local privado, fora do git. Sala/cozinha e sala/quarto têm conexão visual; limiar externo, localização do acesso ao banheiro e retorno ao jardim exigem cortes. O usuário quer câmera em primeira pessoa. OpenArt MCP está acessível e aceitou a referência da sala com o vão do quarto aberto. Teste preparado: PixVerse V6, `image2video`, um clipe de 3 s, 540p, sem áudio; cotação de 30 créditos revalidada antes do envio. **O usuário autorizou este único consumo respondendo “sim” à pergunta explícita sobre os 30 créditos.** A referência do termo das fotos ainda não foi informada. Este experimento não substitui o ADR-013 nem autoriza outros gastos.
 
 ## Em andamento
 - [x] Setup da equipe de agentes, skills e memória (branch `setup/agent-team`)
@@ -37,7 +37,8 @@ Atualizado: 2026-11-03
   6. Depth Anything (pendência 4) continua inviável aqui: em 03/11, Hugging Face (timeout) e github.com/DepthAnything (403) bloqueados pelo proxy; só o PyPI passa. Gerar os `.depth.png` na máquina do usuário ou adiar o parallax real.
 
 ## Autorizações de gasto
-Nenhuma. Chamadas pagas (OpenArt, Gemini Omni, Veo, Kling, GPU) estão **bloqueadas** até o usuário autorizar o respectivo consumo. A cotação do piloto OpenArt de 30 créditos ainda não é uma autorização; o orçamento da Fase 0 continua proposto em até R$ 350.
+- **OpenArt — piloto único autorizado nesta conversa:** resposta “sim” do usuário à pergunta “Autoriza consumir esses 30 créditos em uma única geração?”. Limite: 30 créditos no total; uma geração PixVerse V6 `image2video`, 3 s, 540p, sem áudio, referência da sala com o quarto visível. Sem repetição automática, extensão, upgrade ou geração das demais cenas. Registrar resultado e cobrança retornados pelo serviço; não presumir conclusão nem gasto efetivo antes da resposta.
+- Todas as demais chamadas pagas (OpenArt, Gemini Omni, Veo, Kling, GPU) continuam **bloqueadas**. O orçamento geral da Fase 0 continua apenas proposto em até R$ 350; não foi autorizado.
 
 ## Decisões de produto pendentes (usuário)
 1. Cliente-alvo inicial (proposta: gestoras de temporada e imobiliárias de alto padrão)

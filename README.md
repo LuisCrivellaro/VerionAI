@@ -106,6 +106,19 @@ Diretrizes técnicas:
 
 As tecnologias definitivas serão escolhidas após análise de viabilidade, qualidade, custos e requisitos de infraestrutura.
 
+### Harness da Fase 0: como rodar
+
+Requisitos: Python 3.12+, [uv](https://docs.astral.sh/uv/) e ffmpeg no PATH.
+
+```bash
+uv sync --frozen --extra gemini   # o extra "gemini" é necessário para os testes dos adaptadores (Omni/Veo, todos com mock)
+uv run pytest -o addopts= -q      # nível padrão: ~1124 testes, sem nenhuma chamada paga
+uv run ruff check . && uv run mypy src
+uv run verion --help              # CLI (roteiro em examples/roteiro.example.toml)
+```
+
+Fotos reais e o banco do harness ficam em `data/` (fora do git). Chamadas pagas são bloqueadas por padrão.
+
 ## 💸 Orçamento inicial
 
 **Teto operacional: R$ 500/mês.**

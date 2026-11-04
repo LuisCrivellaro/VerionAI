@@ -1,0 +1,24 @@
+{
+  "enabledPlugins": {
+    "superpowers@superpowers-dev": true
+  },
+  "extraKnownMarketplaces": {
+    "superpowers-dev": {
+      "source": {
+        "source": "github",
+        "repo": "obra/superpowers"
+      }
+    }
+  },
+  "permissions": {
+    "deny": [
+      "Bash(*budget authorize*)",
+      "Bash(*--reviewer humano*)",
+      "Bash(*GEMINI_API_KEY*)",
+      "Bash(printenv*)",
+      "Edit(data/**)",
+      "Edit(.claude/settings*.json)",
+      "Read(.env*)"
+    ]
+  }
+}

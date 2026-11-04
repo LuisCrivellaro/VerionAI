@@ -1,0 +1,16 @@
+SKILLS de projeto válidas: 15 -> gemini-api-dev, gemini-omni-flash-api, llm-evaluation, principal-security-engineer, python-expert, python-resilience, python-testing-patterns, senior-code-reviewer, senior-cv-engineer, senior-eval-engineer, senior-product-manager, staff-software-architect, uv-package-manager, verion-ffmpeg-assembly, verion-fidelity-qc
+AGENTE verion-ai-engineer: frontmatter=OK model=sonnet skills=['gemini-api-dev', 'gemini-omni-flash-api', 'llm-evaluation', 'senior-eval-engineer', 'python-resilience'] faltando=[] 
+AGENTE verion-architect: frontmatter=OK model=opus skills=['staff-software-architect'] faltando=[] 
+AGENTE verion-backend: frontmatter=OK model=sonnet skills=['python-expert', 'uv-package-manager'] faltando=[] 
+AGENTE verion-code-reviewer: frontmatter=OK model=sonnet skills=['senior-code-reviewer'] faltando=[] SOMENTE LEITURA
+AGENTE verion-frontend: frontmatter=OK model=sonnet skills=[] faltando=[] 
+AGENTE verion-media-engineer: frontmatter=OK model=sonnet skills=['verion-ffmpeg-assembly', 'verion-fidelity-qc', 'senior-cv-engineer'] faltando=[] 
+AGENTE verion-product: frontmatter=OK model=sonnet skills=['senior-product-manager'] faltando=[] 
+AGENTE verion-qa: frontmatter=OK model=sonnet skills=['python-testing-patterns'] faltando=[] 
+AGENTE verion-security: frontmatter=OK model=sonnet skills=['principal-security-engineer'] faltando=[] SOMENTE LEITURA
+ERROS: 0
+  > superpowers@superpowers-dev
+    Version: 7.0.1
+    Scope: project
+    Status: √ enabled
+

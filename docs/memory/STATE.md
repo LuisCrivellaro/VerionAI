@@ -6,7 +6,9 @@ Atualizado: 2026-11-03
 **Fase 0 — validação audiovisual**: ferramenta (harness) pronta e testada sem gasto; validação com imóveis reais aguarda decisões do usuário.
 
 **Ferramenta principal de vídeo (ADR-013, 03/11):** Open-Higgsfield-AI (fork Autom8AI) com kie.ai (Seedance 2.0 / Kling 3.0), usada manualmente na máquina do usuário. Ken Burns e parallax continuam como fallback gratuito.
-**Próximo passo imediato:** usuário envia as fotos da acomodação (com termo) para o teste. Gerar com kie.ai exige chave própria e autorização de gasto registrada abaixo.
+**Próximo passo imediato:** revisar o roteiro POV preparado com as fotos recebidas e aguardar autorização explícita para o piloto no OpenArt (30 créditos), além da referência do termo das fotos. Gerar com kie.ai também exige chave própria e autorização de gasto registrada abaixo.
+
+**Preparação de teste POV com OpenArt (pedido posterior do usuário):** recebidos oito prints; 46 fotos extraídas sem alteração dos pixels, identificadas e organizadas em pacote local privado, fora do git. Sala/cozinha e sala/quarto têm conexão visual; limiar externo, localização do acesso ao banheiro e retorno ao jardim exigem cortes. O usuário quer câmera em primeira pessoa. OpenArt MCP está acessível e aceitou a referência da sala com o vão do quarto aberto. Teste preparado: PixVerse V6, `image2video`, um clipe de 3 s, 540p, sem áudio; cotação de 30 créditos. **Nenhuma geração enviada; consumo de créditos aguarda autorização explícita.** A referência do termo das fotos ainda não foi informada. Este é um experimento solicitado; não substitui o ADR-013 nem libera gastos.
 
 ## Em andamento
 - [x] Setup da equipe de agentes, skills e memória (branch `setup/agent-team`)
@@ -28,14 +30,14 @@ Atualizado: 2026-11-03
 - [ ] **Trava de permissões ainda NÃO confirmada:** a sessão de 03/11 começou fora do repo (clone no meio da sessão), então o `echo budget authorize` passou sem valer como teste; e o `claude -p` headless falhou com erro de autenticação neste ambiente. Confirmar numa sessão aberta **já dentro do repo** (ou no Claude Code local do usuário).
 - [ ] **PRÓXIMO PASSO (depende do usuário):**
   1. Numa sessão nova, confirmar que a trava bloqueia (ex.: `echo budget authorize` deve ser negado).
-  2. Usuário anexa fotos de 1–3 imóveis + código do termo; supervisor monta o roteiro (`property_id` tipo `imv-001`, fotos fora do git em `data/`).
+  2. Fotos de uma acomodação já recebidas em oito prints e roteiro POV preparado; aguarda código do termo. Novas fotos reais permanecem fora do git; nenhum conteúdo visual ou endereço foi versionado.
   3. Rodar `ken-burns` nas fotos reais, gerar quadros de QC e montar o vídeo; usuário aprova no terminal (`APROVO tentativa N`).
   4. Parallax em fotos reais precisa de mapa de profundidade: avaliar modelo com licença comercial (Depth Anything V2 Small, Apache-2.0 — hipótese; Hugging Face bloqueado pelo proxy).
   5. Chamada paga do Omni só após autorização futura do usuário. **Pré-requisitos extras da 1ª chamada paga:** teto do `settle_ok` contra a reserva (hoje um clipe mais longo que o pedido pode estourar a reserva em até a duração máxima do modelo; o custo real continua gravado e a próxima `reserve` bloqueia, mas o excesso de uma tentativa não é impedido) e preço oficial do Omni em 1080p.
   6. Depth Anything (pendência 4) continua inviável aqui: em 03/11, Hugging Face (timeout) e github.com/DepthAnything (403) bloqueados pelo proxy; só o PyPI passa. Gerar os `.depth.png` na máquina do usuário ou adiar o parallax real.
 
 ## Autorizações de gasto
-Nenhuma. Chamadas pagas (Gemini Omni, Veo, Kling, GPU) estão **bloqueadas** até o usuário autorizar o orçamento da Fase 0 (proposta: até R$ 350).
+Nenhuma. Chamadas pagas (OpenArt, Gemini Omni, Veo, Kling, GPU) estão **bloqueadas** até o usuário autorizar o respectivo consumo. A cotação do piloto OpenArt de 30 créditos ainda não é uma autorização; o orçamento da Fase 0 continua proposto em até R$ 350.
 
 ## Decisões de produto pendentes (usuário)
 1. Cliente-alvo inicial (proposta: gestoras de temporada e imobiliárias de alto padrão)
